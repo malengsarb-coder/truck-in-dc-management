@@ -111,8 +111,10 @@ function App() {
   };
   const fetchDriverJob = async () => {
     if (!driverJobData) return;
-    const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).eq('id', driverJobData.id).single();
-    if (data) { if (data.status === 'Finish') { alert('🏁 งานของคุณเสร็จสิ้นเรียบร้อยแล้ว!'); handleLogout(); } else { setDriverJobData(data); } }
+    const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).eq('daily_plan_id', driverJobData.daily_plan_id).neq('status', 'Finish').order('check_in_time', { ascending: false }).limit(1).single();
+    if (data) { setDriverJobData(data); } else {
+       alert('🏁 งานของคุณเสร็จสิ้นครบทุกคลังเรียบร้อยแล้ว!'); handleLogout();
+    }
   };
   const fetchYardOrders = async () => {
     if (currentView !== 'yard') return; const { data, error } = await supabase.from('orders').select(`*, companies(*)`).eq('status', 'pending').order('created_at', { ascending: false }); if (data && !error) setYardOrders(data);
@@ -142,15 +144,52 @@ function App() {
     return () => clearInterval(timer);
   }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
 
+  // 💡 Export CSV สำหรับรถ 1 คันที่ลงได้สูงสุด 5 คลัง (กางข้อมูลแนวนอนให้)
   const handleExportCSV = () => {
     if (allJobs.length === 0) { alert('ไม่มีข้อมูลให้ Export ครับ'); return; }
-    const headers = ['เลขคิว', 'เส้นทางลงสินค้า', 'ทะเบียนรถ', 'ประเภท', 'Vendor Code', 'Vendor Name', 'ประวัติช่องจอด', 'สถานะ', '1.เวลาเข้าลาน (Check In)', '2.เวลาเรียกคิว (Call Up)', '3.เวลาเข้าช่องจอด (On Dock)', '4.เวลาเริ่มลงของ (Start Load)', '5.เวลาลงของเสร็จ (End Load)', '6.เวลาถอยออก (Finish)'];
-    const formatTime = (isoString: string | null) => isoString ? new Date(isoString).toLocaleString('th-TH') : '-';
-    const csvData = allJobs.map((job) => {
-      return `"${displayQueue(job.queue_number)}","${getDCRoute(job.queue_number)}","${getDisplayPlate(job.daily_plan)}","${job.daily_plan?.transport_type || '-'}","${job.daily_plan?.vendor_code || '-'}","${job.daily_plan?.vendor_name || '-'}","${job.dock_number || '-'}","${job.status}","${formatTime(job.check_in_time)}","${formatTime(job.call_time)}","${formatTime(job.on_dock_time)}","${formatTime(job.start_load_time)}","${formatTime(job.end_load_time)}","${formatTime(job.finish_time)}"`;
+    
+    const baseHeaders = ['วันที่ Check In', 'เลขคิวงาน', 'ทะเบียนรถ', 'ประเภทรถ', 'บริษัทขนส่ง', 'Vendor Code', 'Vendor Name', 'สถานะล่าสุด'];
+    let dockHeaders = [];
+    for (let i = 1; i <= 5; i++) {
+      dockHeaders.push(`คลังที่ ${i}`, `ช่องจอด ${i}`, `Call Up ${i}`, `On Dock ${i}`, `Start Load ${i}`, `End Load ${i}`, `ถอยออก ${i}`);
+    }
+    const headers = [...baseHeaders, ...dockHeaders];
+
+    const formatTime = (isoString: string | null) => isoString ? new Date(isoString).toLocaleTimeString('th-TH') : '-';
+    const formatDate = (isoString: string | null) => isoString ? new Date(isoString).toLocaleDateString('th-TH') : '-';
+
+    const groupedJobs: any = {};
+    allJobs.forEach(job => {
+      const planId = job.daily_plan_id;
+      if (!groupedJobs[planId]) groupedJobs[planId] = [];
+      groupedJobs[planId].push(job);
     });
+
+    const csvData = Object.keys(groupedJobs).map(planId => {
+      const jobs = groupedJobs[planId].sort((a: any, b: any) => new Date(a.check_in_time).getTime() - new Date(b.check_in_time).getTime());
+      const firstJob = jobs[0];
+      const lastJob = jobs[jobs.length - 1];
+      const plan = firstJob.daily_plan;
+
+      let row = [
+        `"${formatDate(firstJob.check_in_time)}"`, `"${displayQueue(firstJob.queue_number)}"`, `"${getDisplayPlate(plan)}"`,
+        `"${plan?.transport_type || '-'}"`, `"${plan?.transport_company || '-'}"`, `"${plan?.vendor_code || '-'}"`,
+        `"${plan?.vendor_name || '-'}"`, `"${lastJob.status}"`
+      ];
+
+      for (let i = 0; i < 5; i++) {
+        if (jobs[i]) {
+          const j = jobs[i];
+          row.push(`"${getDCFromQueue(j.queue_number)}"`, `"${j.dock_number || '-'}"`, `"${formatTime(j.call_time)}"`, `"${formatTime(j.on_dock_time)}"`, `"${formatTime(j.start_load_time)}"`, `"${formatTime(j.end_load_time)}"`, `"${formatTime(j.finish_time)}"`);
+        } else {
+          row.push('""', '""', '""', '""', '""', '""', '""');
+        }
+      }
+      return row.join(',');
+    });
+
     const blob = new Blob(['\uFEFF' + [headers.join(','), ...csvData].join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.setAttribute('href', url); link.setAttribute('download', `Dock_KPI_Report_${filterDate}.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.setAttribute('href', url); link.setAttribute('download', `Backhaul_Logistics_Report_${filterDate}.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
   const handleExportDockCSV = () => {
@@ -188,9 +227,9 @@ function App() {
     else {
       const inputDigits = user.replace(/\D/g, ''); const passDigits = pass.replace(/\D/g, '');
       if (inputDigits && inputDigits === passDigits) {
-        const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).neq('status', 'Finish');
+        const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).neq('status', 'Finish').order('check_in_time', { ascending: false });
         const matchedJob = data?.find((job) => { const lp = (job.daily_plan?.license_plate || '').replace(/\D/g, ''); const tp = (job.daily_plan?.trailer_plate || '').replace(/\D/g, ''); return (lp && lp === inputDigits) || (tp && tp === inputDigits); });
-        if (matchedJob) { setCurrentView('driver'); setDriverJobData(matchedJob); setUsername(''); setPassword(''); } else { alert('❌ รถทะเบียนนี้ยังไม่ Check In หรือใส่รหัสไม่ถูกต้อง'); }
+        if (matchedJob) { setCurrentView('driver'); setDriverJobData(matchedJob); setUsername(''); setPassword(''); } else { alert('❌ รถทะเบียนนี้ยังไม่ Check In หรือเข้าครบทุกคลังแล้ว (รหัสไม่ถูกต้อง)'); }
       } else { alert('❌ ชื่อผู้ใช้ หรือ รหัสผ่านไม่ถูกต้อง!'); }
     }
   };
@@ -252,7 +291,7 @@ function App() {
       const { data: existing } = await supabase.from('backhaul_jobs').select('id').eq('daily_plan_id', planData.id).neq('status', 'Finish').limit(1);
       if (existing && existing.length > 0) { alert('⚠️ รถคันนี้ Check-in ไปแล้ว'); setCheckInModal(null); setLoading(false); return; }
 
-      await supabase.from('backhaul_jobs').insert([{ daily_plan_id: planData.id, queue_number: queueNo, status: 'Call Up', }]);
+      await supabase.from('backhaul_jobs').insert([{ daily_plan_id: planData.id, queue_number: queueNo, status: 'Call Up', check_in_time: new Date().toISOString() }]);
       alert(`✅ เช็คอินสำเร็จ!`); setCheckInModal(null); setPlanSearchQuery(''); fetchAllJobs();
     } catch (error: any) { alert('❌ เกิดข้อผิดพลาดในการ Check In'); } finally { setLoading(false); }
   };
@@ -282,10 +321,11 @@ function App() {
 
   const handleConfirmDock = async () => {
     if (!dockModal || dockModal.selectedDocks.length !== dockModal.requiredCount) return;
-    const { job, selectedDocks } = dockModal; const dockNo = selectedDocks.join(', ');
+    const { job, selectedDocks } = dockModal; 
+    const dockNo = selectedDocks.join(', ');
     
-    const historyDock = job.dock_number ? `${job.dock_number} ➡️ ` : '';
-    const updateData = { status: 'Assigned', dock_number: historyDock + dockNo, call_time: new Date().toISOString(), };
+    // 💡 ไม่ต้องเอาประวัติมาต่อท้ายแล้ว เซฟแค่ช่องปัจจุบันก็พอ (เดี๋ยวโค้ดหน้าจอจะเอามาต่อให้เอง)
+    const updateData = { status: 'Assigned', dock_number: dockNo, call_time: new Date().toISOString(), };
     await executeStatusUpdate(job.id, updateData);
 
     const plate = getDisplayPlate(job.daily_plan);
@@ -299,21 +339,35 @@ function App() {
 
   const handleMultiDropChoice = async (choice: 'yes' | 'no', nextDC?: string) => {
     if (!multiDropConfig) return; const job = multiDropConfig.job; const transportType = job.daily_plan?.transport_type || '';
+    const now = new Date().toISOString();
+
     if (choice === 'no') {
-      setMultiDropConfig(null); await executeStatusUpdate(job.id, { status: 'End Load', end_load_time: new Date().toISOString(), });
+      setMultiDropConfig(null); await executeStatusUpdate(job.id, { status: 'End Load', end_load_time: now, });
       const companyName = job.daily_plan?.transport_company || ''; let shuntCompanyId = null;
       if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt')); if (prt) shuntCompanyId = prt.id; } else if (companyName.includes('คาร์โก้') || companyName.includes('VCG')) { const vcg = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('vcg')); if (vcg) shuntCompanyId = vcg.id; }
       if (shuntCompanyId && transportType === 'T18W') { await supabase.from('orders').insert([{ company_id: shuntCompanyId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: 'ตู้เปล่า', status: 'pending', },]); }
     } else if (choice === 'yes' && nextDC) {
       setMultiDropConfig(null); let baseQueue = (job.queue_number || '').split(' (')[0]; let currentRoute = getDCRoute(job.queue_number);
-      await executeStatusUpdate(job.id, { status: 'Call Up', queue_number: `${baseQueue} (${currentRoute} -> ${nextDC})`, }); await releaseDocks(job.id);
+      
+      // 💡 1. ปิดจ๊อบคลังแรกทันที เพื่อสต๊าฟเวลาทั้งหมดเอาไว้สำหรับออก Report CSV
+      await executeStatusUpdate(job.id, { status: 'Finish', end_load_time: now, finish_time: now }); 
+      await releaseDocks(job.id);
+
+      // 💡 2. แอบสร้างบรรทัดใหม่ เพื่อไปจับเวลารอคิวที่คลังสองต่อ (หน้าจอจะถูกกรุ๊ปรวมกันไม่ให้แอดมินเห็น)
+      await supabase.from('backhaul_jobs').insert([{ 
+        daily_plan_id: job.daily_plan_id, 
+        queue_number: `${baseQueue} (${currentRoute} -> ${nextDC})`, 
+        status: 'Call Up',
+        check_in_time: now
+      }]);
+      fetchAllJobs();
     }
   };
 
   const handleRollbackStatus = async (jobId: string, currentStatus: string) => {
     const confirmRollback = window.confirm(`ต้องการย้อนกลับสถานะ?`); if (!confirmRollback) return;
     let prevStatus = ''; let updateData: any = {};
-    if (currentStatus === 'Assigned') { prevStatus = 'Call Up'; updateData = { status: prevStatus, call_time: null }; await releaseDocks(jobId); }
+    if (currentStatus === 'Assigned') { prevStatus = 'Call Up'; updateData = { status: prevStatus, call_time: null, dock_number: null }; await releaseDocks(jobId); }
     else if (currentStatus === 'On Dock') { prevStatus = 'Assigned'; updateData = { status: prevStatus, on_dock_time: null }; } 
     else if (currentStatus === 'Unloading') { prevStatus = 'On Dock'; updateData = { status: prevStatus, start_load_time: null }; } 
     else if (currentStatus === 'End Load') { prevStatus = 'Unloading'; updateData = { status: prevStatus, end_load_time: null }; } 
@@ -346,9 +400,13 @@ function App() {
   const isPlanCheckedIn = (planId: string) => { return allJobs.some( (job) => job.daily_plan_id === planId && job.status !== 'Finish' ); };
 
   const getExecDashboardKPIs = () => {
-    const dailyPlansToday = dailyPlans.filter(p => { return true; });
+    const dailyPlansToday = dailyPlans.filter(p => true);
+    
+    // 💡 นับจำนวนรถจาก Plan จริงๆ ไม่ให้เบิ้ล
+    const uniquePlansCheckIn = new Set(allJobs.map(j => j.daily_plan_id));
+
     const totalPlan = dailyPlansToday.length;
-    const totalCheckIn = allJobs.length;
+    const totalCheckIn = uniquePlansCheckIn.size;
     const notArrived = Math.max(0, totalPlan - totalCheckIn);
     
     let countWait = 0, countOnDock = 0, countUnload = 0, countFinished = 0;
@@ -358,14 +416,9 @@ function App() {
     const dcStats: any = {};
     MASTER_DCS.forEach(dc => dcStats[dc] = { waitSum: 0, waitCount: 0, loadSum: 0, loadCount: 0 });
 
+    // คำนวณเวลาเฉลี่ยจากทุกครั้งที่มีการลงของ
     allJobs.forEach((job) => {
-      if (job.status === 'Call Up' || job.status === 'Assigned') countWait++;
-      else if (job.status === 'On Dock') countOnDock++;
-      else if (job.status === 'Unloading') countUnload++;
-      else if (job.status === 'Finish' || job.status === 'End Load' || job.status === 'Off Dock') countFinished++;
-
       const dc = getDCFromQueue(job.queue_number);
-
       if (job.call_time && job.check_in_time) {
         const waitMins = (new Date(job.call_time).getTime() - new Date(job.check_in_time).getTime()) / 60000;
         if (waitMins >= 0) { 
@@ -382,7 +435,21 @@ function App() {
       }
     });
 
-    const toPercent = (count: number) => totalCheckIn > 0 ? ((count / totalCheckIn) * 100).toFixed(1) : '0.0';
+    // 💡 ดึงเฉพาะสถานะล่าสุดของรถแต่ละคันมาคิดเปอร์เซ็นต์ เพื่อไม่ให้ยอดรวมเกิน
+    const latestJobs = Object.values(allJobs.reduce((acc: any, job: any) => {
+      acc[job.daily_plan_id] = job;
+      return acc;
+    }, {}));
+
+    latestJobs.forEach((job: any) => {
+      if (job.status === 'Call Up' || job.status === 'Assigned') countWait++;
+      else if (job.status === 'On Dock') countOnDock++;
+      else if (job.status === 'Unloading') countUnload++;
+      else if (job.status === 'Finish' || job.status === 'End Load' || job.status === 'Off Dock') countFinished++;
+    });
+
+    const totalActiveStatuses = countWait + countOnDock + countUnload + countFinished;
+    const toPercent = (count: number) => totalActiveStatuses > 0 ? ((count / totalActiveStatuses) * 100).toFixed(1) : '0.0';
 
     return {
       totalPlan, totalCheckIn, notArrived,
@@ -398,7 +465,7 @@ function App() {
 
   const getDockUtilization = () => {
     const usageByDC: any = {};
-    MASTER_DCS.forEach(dc => usageByDC[dc] = { totalIn: 0, occIn: 0, totalOut: 0, occOut: 0 });
+    MASTER_DCS.forEach(dc => usageByDC[dc] = { totalIn: 0, occIn: 0 });
 
     masterDocksList.forEach(dock => {
       const dc = dock.physical_dc;
@@ -408,25 +475,27 @@ function App() {
         usageByDC[dc].totalIn++;
         if (isOccupied) usageByDC[dc].occIn++;
       }
-      if (dock.allowed_type === 'Outbound' || dock.allowed_type === 'Both') {
-        usageByDC[dc].totalOut++;
-        if (isOccupied) usageByDC[dc].occOut++;
-      }
     });
     return usageByDC;
   };
 
   const renderHeatmap = () => {
-    const grouped = masterDocksList.reduce((acc, dock) => { if (!acc[dock.physical_dc]) acc[dock.physical_dc] = []; acc[dock.physical_dc].push(dock); return acc; }, {} as any);
+    const inboundDocks = masterDocksList.filter(dock => dock.allowed_type === 'Inbound' || dock.allowed_type === 'Both');
+    const grouped = inboundDocks.reduce((acc, dock) => { 
+      if (!acc[dock.physical_dc]) acc[dock.physical_dc] = []; 
+      acc[dock.physical_dc].push(dock); 
+      return acc; 
+    }, {} as any);
+
     return Object.keys(grouped).sort().map((dc) => (
       <div key={dc} style={{ marginBottom: '25px', padding: '15px', background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', }}>
         <h4 style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '10px', marginTop: 0, fontSize: '18px', color: '#334155', }}>📍 คลัง {dc}</h4>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '15px', }}>
           {grouped[dc].map((dock: any) => {
-            const isOccupied = dock.status === 'Occupied'; const isOutbound = dock.allowed_type === 'Outbound';
-            const color = isOccupied ? '#ef4444' : isOutbound ? '#cbd5e1' : '#22c55e';
+            const isOccupied = dock.status === 'Occupied'; 
+            const color = isOccupied ? '#ef4444' : '#22c55e';
             return (
-              <div key={dock.id} title={`ประตู ${dock.dock_no} - ${dock.status}`} style={{ width: '65px', height: '65px', backgroundColor: color, color: isOutbound ? '#475569' : 'white', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: '8px', boxShadow: 'inset 0 -2px 0 rgba(0,0,0,0.1)', }}>
+              <div key={dock.id} title={`ประตู ${dock.dock_no} - ${dock.status}`} style={{ width: '65px', height: '65px', backgroundColor: color, color: 'white', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: '8px', boxShadow: 'inset 0 -2px 0 rgba(0,0,0,0.1)', }}>
                 <span style={{ fontSize: '18px', fontWeight: '900' }}> {dock.dock_no} </span>
                 {isOccupied && ( <span style={{ fontSize: '10px', background: 'rgba(0,0,0,0.25)', padding: '2px 4px', borderRadius: '4px', marginTop: '3px', maxWidth: '90%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', }} > {dock.current_plate || 'มีรถ'} </span> )}
               </div>
@@ -455,6 +524,18 @@ function App() {
 
   const execData = getExecDashboardKPIs();
   const utilData = getDockUtilization();
+
+  // 💡 ตัวกรองซ่อนบรรทัดให้หน้าจอ Admin Dashboard รวบเหลือบรรทัดเดียว
+  const displayJobs = Object.values(allJobs.reduce((acc: any, job: any) => {
+    const pId = job.daily_plan_id;
+    if (!acc[pId]) {
+      acc[pId] = { ...job, combined_docks: job.dock_number ? [job.dock_number] : [] };
+    } else {
+      const newDocks = job.dock_number ? [...acc[pId].combined_docks, job.dock_number] : acc[pId].combined_docks;
+      acc[pId] = { ...job, combined_docks: newDocks }; // อัปเดตทับเป็นข้อมูลล่าสุด แต่เก็บ history ประตูไว้โชว์
+    }
+    return acc;
+  }, {}));
 
   return (
     <div className="container">
@@ -495,7 +576,7 @@ function App() {
                 </div>
               </div>
 
-              <h4 style={{ color: '#334155', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>📍 สถานะรถในลานปัจจุบัน (คิดจากยอด Check-In)</h4>
+              <h4 style={{ color: '#334155', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>📍 สถานะรถในลานปัจจุบัน (คิดจากยอดที่ Check-In)</h4>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '20px' }}>
                 <div style={{ background: '#f1f5f9', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
                   <div style={{ color: '#64748b', fontWeight: 'bold' }}>รอลงสินค้า (Wait)</div>
@@ -523,8 +604,8 @@ function App() {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '15px' }}>
                 <div style={{ background: 'white', padding: '15px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
                    <div style={{ fontWeight: 'bold', color: '#334155', marginBottom: '10px' }}>ภาพรวมทั้งหมด</div>
-                   <div>รอลงสินค้าเฉลี่ย: <strong style={{color:'#f59e0b'}}>{execData.avgWaitOverall} นาที/คัน</strong></div>
-                   <div>เวลาลงสินค้าเฉลี่ย: <strong style={{color:'#10b981'}}>{execData.avgLoadOverall} นาที/คัน</strong></div>
+                   <div>รอลงสินค้าเฉลี่ย: <strong style={{color:'#f59e0b'}}>{execData.avgWaitOverall} นาที/รอบ</strong></div>
+                   <div>เวลาลงสินค้าเฉลี่ย: <strong style={{color:'#10b981'}}>{execData.avgLoadOverall} นาที/รอบ</strong></div>
                 </div>
                 {MASTER_DCS.map(dc => {
                   const stats = execData.dcStats[dc];
@@ -533,8 +614,8 @@ function App() {
                   return (
                     <div key={dc} style={{ background: 'white', padding: '15px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
                       <div style={{ fontWeight: 'bold', color: '#334155', marginBottom: '10px' }}>แยกตามคลัง {dc}</div>
-                      <div>รอลงสินค้าเฉลี่ย: <strong style={{color:'#f59e0b'}}>{wait} นาที/คัน</strong></div>
-                      <div>เวลาลงสินค้าเฉลี่ย: <strong style={{color:'#10b981'}}>{load} นาที/คัน</strong></div>
+                      <div>รอลงสินค้าเฉลี่ย: <strong style={{color:'#f59e0b'}}>{wait} นาที/รอบ</strong></div>
+                      <div>เวลาลงสินค้าเฉลี่ย: <strong style={{color:'#10b981'}}>{load} นาที/รอบ</strong></div>
                     </div>
                   )
                 })}
@@ -596,7 +677,8 @@ function App() {
                 <table className="dashboard-table">
                   <thead> <tr> <th>เวลา Check In</th> <th>Queue</th> <th>ลงสินค้า</th> <th>ทะเบียนรถ</th> <th>บริษัทขนส่ง</th> <th>ประเภทรถ</th> <th>Vendor</th> <th>Dock (ประวัติ)</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
-                    {allJobs.map((job) => (
+                    {/* 💡 วนลูปโชว์ข้อมูลจาก displayJobs (ที่มีบรรทัดเดียว) แทน allJobs */}
+                    {(displayJobs as any[]).map((job) => (
                       <tr key={job.id}>
                         <td> {new Date(job.check_in_time).toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', })} น. </td>
                         <td> <strong>{displayQueue(job.queue_number)}</strong> </td>
@@ -605,7 +687,7 @@ function App() {
                         <td style={{ fontWeight: 'bold', color: '#555' }}> {job.daily_plan?.transport_company || '-'} </td>
                         <td>{job.daily_plan?.transport_type}</td>
                         <td className="vendor-cell"> {job.daily_plan?.vendor_code && ( <span style={{ color: '#64748b', fontSize: '11px', display: 'block', }} > [{job.daily_plan.vendor_code}] </span> )} {job.daily_plan?.vendor_name || '-'} </td>
-                        <td> <span className="dock-badge" style={{whiteSpace: 'nowrap'}}> {job.dock_number || '-'} </span> </td>
+                        <td> <span className="dock-badge" style={{whiteSpace: 'nowrap'}}> {job.combined_docks.join(' ➡️ ') || '-'} </span> </td>
                         <td> <span className={`status-badge ${job.status.replace( ' ', '-' )}`} > {job.status} </span> </td>
                         <td style={{ textAlign: 'center' }}> {renderActionButton(job)} </td>
                       </tr>
@@ -630,30 +712,24 @@ function App() {
                 {MASTER_DCS.map(dc => {
                   const data = utilData[dc];
                   const pctIn = data.totalIn > 0 ? ((data.occIn / data.totalIn) * 100).toFixed(0) : '0';
-                  const pctOut = data.totalOut > 0 ? ((data.occOut / data.totalOut) * 100).toFixed(0) : '0';
                   return (
                     <div key={dc} style={{ background: 'white', padding: '20px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderTop: '5px solid #10b981' }}>
                        <h4 style={{ margin: '0 0 10px 0', color: '#334155'}}>คลัง {dc}</h4>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px'}}>
+                       <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #eee', paddingBottom: '10px', marginBottom: '10px'}}>
                           <span style={{color: '#64748b'}}>Inbound Usage:</span>
                           <strong style={{color: '#ef4444'}}>{data.occIn}/{data.totalIn} บาน ({pctIn}%)</strong>
                        </div>
-                       <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #eee', paddingBottom: '10px', marginBottom: '10px'}}>
-                          <span style={{color: '#64748b'}}>Outbound Usage:</span>
-                          <strong style={{color: '#ef4444'}}>{data.occOut}/{data.totalOut} บาน ({pctOut}%)</strong>
-                       </div>
-                       <div style={{ fontSize: '12px', color: '#94a3b8' }}>* อัตราการใช้งานคำนวณจากสถานะ Occupied ของประตูที่เปิดใช้งานแบบ Real-time</div>
+                       <div style={{ fontSize: '12px', color: '#94a3b8' }}>* อัตราการใช้งานคำนวณจากสถานะ Occupied ของประตูฝั่ง Inbound ที่เปิดใช้งาน</div>
                     </div>
                   );
                 })}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderBottom: '2px solid #e2e8f0', paddingBottom: '10px', marginBottom: '20px', }}>
-                <h3 style={{ margin: 0, color: '#334155' }}> 🏢 Live Dock Heatmap (สถานะประตูหน้าลาน) </h3>
+                <h3 style={{ margin: 0, color: '#334155' }}> 🏢 Live Dock Heatmap (เฉพาะฝั่ง Inbound) </h3>
                 <div style={{ display: 'flex', gap: '15px', fontSize: '14px', fontWeight: 'bold', color: '#475569', }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }}> <div style={{ width: '16px', height: '16px', background: '#22c55e', borderRadius: '4px', }} ></div> ว่างพร้อมใช้งาน </span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }} > <div style={{ width: '16px', height: '16px', background: '#ef4444', borderRadius: '4px', }} ></div> กำลังลงสินค้า </span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }}> <div style={{ width: '16px', height: '16px', background: '#cbd5e1', borderRadius: '4px', }} ></div> Outbound / ปิด </span>
                 </div>
               </div>
 
