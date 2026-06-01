@@ -5,25 +5,12 @@ import './App.css';
 const MASTER_DCS = ['DC2', 'DC6', 'DC7.2'];
 
 function App() {
-  const [currentView, setCurrentView] = useState<'login' | 'admin' | 'receiver' | 'driver' | 'unloader' | 'yard' | 'shunt'>('login');
+  const [currentView, setCurrentView] = useState<'login' | 'admin' | 'driver'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [receiverDC, setReceiverDC] = useState('');
   const [driverJobData, setDriverJobData] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
   const [allJobs, setAllJobs] = useState<any[]>([]);
-  const [waitingJobs, setWaitingJobs] = useState<any[]>([]);
-  const [multiDropConfig, setMultiDropConfig] = useState<{ job: any; step: 'ask' | 'select' } | null>(null);
-  const [companiesList, setCompaniesList] = useState<any[]>([]);
-  const [yardCompanyId, setYardCompanyId] = useState('');
-  const [yardContainerNo, setYardContainerNo] = useState('');
-  const [yardOrigin, setYardOrigin] = useState('');
-  const [yardDestination, setYardDestination] = useState('');
-  const [yardOrders, setYardOrders] = useState<any[]>([]);
-  const [shuntCompany, setShuntCompany] = useState('');
-  const [shuntOrders, setShuntOrders] = useState<any[]>([]);
-  const [filterDate, setFilterDate] = useState(() => new Date().toISOString().split('T')[0]);
-
+  
   const [dockModal, setDockModal] = useState<{ isOpen: boolean; job: any; docks: any[]; selectedDocks: string[]; requiredCount: number } | null>(null);
 
   const [adminTab, setAdminTab] = useState<'plan' | 'dashboard' | 'utilization'>('plan');
@@ -32,21 +19,20 @@ function App() {
   const [checkInModal, setCheckInModal] = useState<{ isOpen: boolean; plan: any; selectedDC: string } | null>(null);
   const [masterDocksList, setMasterDocksList] = useState<any[]>([]);
 
-  const initialPlanForm = { id: '', transport_summary_no: '', job_no: '', vendor_code: '', vendor_name: '', transport_type: '', license_plate: '', trailer_plate: '', driver_name: '', transport_company: '', appointment_no: '' };
+  const initialPlanForm = { transport_summary_no: '', job_no: '', vendor_code: '', vendor_name: '', transport_type: '', license_plate: '', trailer_plate: '', driver_name: '', transport_company: '', appointment_no: '' };
   const [showPlanForm, setShowPlanForm] = useState(false);
-  const [planForm, setPlanForm] = useState(initialPlanForm);
+  const [planForm, setPlanForm] = useState<any>(initialPlanForm);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setLoading(true);
     const reader = new FileReader();
     reader.onload = async (event) => {
       try {
         const text = event.target?.result as string;
         const rows = text.split('\n').map(row => row.trim()).filter(row => row);
-        if (rows.length < 2) throw new Error('ไฟล์ว่างเปล่า หรือไม่มีข้อมูล');
+        if (rows.length < 2) throw new Error('ไฟล์ว่างเปล่า');
         const parseCSVLine = (str: string) => {
           const arr = []; let quote = false; let col = '';
           for (let i = 0; i < str.length; i++) {
@@ -81,87 +67,51 @@ function App() {
         if (insertData.length > 0) {
           const { error } = await supabase.from('daily_plan').insert(insertData);
           if (error) throw error; alert(`✅ นำเข้าสำเร็จ ${insertData.length} รายการ!`); fetchDailyPlans(); 
-        } else { alert('⚠️ ไม่พบข้อมูลที่ตรงกับฟอร์แมตในไฟล์'); }
+        }
       } catch (error: any) { alert(`❌ เกิดข้อผิดพลาด: ${error.message}`); } finally {
-        setLoading(false); if (fileInputRef.current) fileInputRef.current.value = ''; 
+        if (fileInputRef.current) fileInputRef.current.value = ''; 
       }
     };
     reader.readAsText(file, 'UTF-8');
   };
 
-  const fetchCompanies = async () => { const { data } = await supabase.from('companies').select('*'); if (data) setCompaniesList(data); };
   const fetchAllJobs = async () => {
-    const startOfDay = `${filterDate}T00:00:00.000Z`; const endOfDay = `${filterDate}T23:59:59.999Z`; const todayStr = new Date().toISOString().split('T')[0];
-    let query = supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).order('check_in_time', { ascending: true });
-    if (filterDate === todayStr) { query = query.or(`and(check_in_time.gte.${startOfDay},check_in_time.lte.${endOfDay}),status.neq.Finish`); }
-    else { query = query.gte('check_in_time', startOfDay).lte('check_in_time', endOfDay); }
-    const { data } = await query; if (data) setAllJobs(data);
+    const todayStr = new Date().toISOString().split('T')[0];
+    const startOfDay = `${todayStr}T00:00:00.000Z`; const endOfDay = `${todayStr}T23:59:59.999Z`; 
+    const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).order('check_in_time', { ascending: true }).or(`and(check_in_time.gte.${startOfDay},check_in_time.lte.${endOfDay}),status.neq.Finish`);
+    if (data) setAllJobs(data);
   };
   const fetchDailyPlans = async () => { const { data } = await supabase.from('daily_plan').select('*').order('id', { ascending: false }).limit(300); if (data) setDailyPlans(data); };
   const fetchMasterDocksList = async () => { const { data } = await supabase.from('master_docks').select('*').order('dock_no', { ascending: true }); if (data) setMasterDocksList(data); };
-  const fetchWaitingJobs = async () => {
-    const { data, error } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).neq('status', 'Finish').order('check_in_time', { ascending: true });
-    if (error || !data) return;
-    let filtered = data;
-    if (currentView === 'receiver' && receiverDC) {
-      filtered = data.filter((job) => {
-        const q = job.queue_number || ''; const match = q.match(/\((.*)\)/);
-        if (match) { const routeParts = match[1].split(' -> '); return routeParts[routeParts.length - 1] === receiverDC; }
-        else { const dcNum = receiverDC === 'DC7.2' ? '7' : receiverDC.replace('DC', ''); return q.startsWith(`${dcNum}-`); }
-      });
-    }
-    setWaitingJobs(filtered);
-  };
+  
   const fetchDriverJob = async () => {
     if (!driverJobData) return;
     const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).eq('id', driverJobData.id).single();
     if (data) { if (data.status === 'Finish') { alert('🏁 งานของคุณเสร็จสิ้นเรียบร้อยแล้ว!'); handleLogout(); } else { setDriverJobData(data); } }
   };
-  const fetchYardOrders = async () => { if (currentView !== 'yard') return; const { data } = await supabase.from('orders').select(`*, companies(*)`).eq('status', 'pending').order('created_at', { ascending: false }); if (data) setYardOrders(data); };
-  const fetchShuntOrders = async () => {
-    if (currentView !== 'shunt' || !shuntCompany) return;
-    const comp = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes(shuntCompany.toLowerCase()));
-    let query = supabase.from('orders').select('*, companies(*)').eq('status', 'pending').order('created_at', { ascending: true });
-    if (comp) query = query.eq('company_id', comp.id);
-    const { data } = await query; if (data) setShuntOrders(data.filter((o) => o.company_id === comp?.id));
-  };
 
   useEffect(() => {
-    fetchCompanies();
     if (currentView === 'admin') { fetchAllJobs(); fetchDailyPlans(); fetchMasterDocksList(); }
-    if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs();
     if (currentView === 'driver') fetchDriverJob();
-    if (currentView === 'yard') fetchYardOrders();
-    if (currentView === 'shunt') fetchShuntOrders();
     const timer = setInterval(() => {
       if (currentView === 'admin') { fetchAllJobs(); fetchDailyPlans(); fetchMasterDocksList(); }
-      if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs();
       if (currentView === 'driver') fetchDriverJob();
-      if (currentView === 'yard') fetchYardOrders();
-      if (currentView === 'shunt') fetchShuntOrders();
     }, 3000);
     return () => clearInterval(timer);
-  }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
+  }, [currentView, driverJobData]);
 
   const handleExportCSV = () => {
     if (allJobs.length === 0) { alert('ไม่มีข้อมูลให้ Export ครับ'); return; }
-    const headers = ['เลขคิว', 'เส้นทางลงสินค้า', 'ทะเบียนรถ', 'ประเภท', 'Vendor Code', 'Vendor Name', 'ช่องจอด', 'สถานะ', '1.เวลาเข้าลาน (Check In)', '2.เวลาเรียกคิว (Call Up)', '3.เวลาเข้าช่องจอด (On Dock)', '4.เวลาเริ่มลงของ (Start Load)', '5.เวลาลงของเสร็จ (End Load)', '6.เวลาถอยออก (Finish)'];
+    const headers = ['เลขคิว', 'เส้นทาง', 'ทะเบียนรถ', 'ประเภท', 'Vendor', 'ช่องจอด', 'สถานะ', 'Check In', 'Call Up', 'On Dock', 'Start Load', 'End Load', 'Finish'];
     const formatTime = (isoString: string | null) => isoString ? new Date(isoString).toLocaleString('th-TH') : '-';
-    const csvData = allJobs.map(job => `"${displayQueue(job.queue_number)}","${getDCRoute(job.queue_number)}","${getDisplayPlate(job.daily_plan)}","${job.daily_plan?.transport_type || '-'}","${job.daily_plan?.vendor_code || '-'}","${job.daily_plan?.vendor_name || '-'}","${job.dock_number || '-'}","${job.status}","${formatTime(job.check_in_time)}","${formatTime(job.call_time)}","${formatTime(job.on_dock_time)}","${formatTime(job.start_load_time)}","${formatTime(job.end_load_time)}","${formatTime(job.finish_time)}"`);
+    const csvData = allJobs.map(job => `"${displayQueue(job.queue_number)}","${getDCRoute(job.queue_number)}","${getDisplayPlate(job.daily_plan)}","${job.daily_plan?.transport_type || '-'}","${job.daily_plan?.vendor_name || '-'}","${job.dock_number || '-'}","${job.status}","${formatTime(job.check_in_time)}","${formatTime(job.call_time)}","${formatTime(job.on_dock_time)}","${formatTime(job.start_load_time)}","${formatTime(job.end_load_time)}","${formatTime(job.finish_time)}"`);
     const blob = new Blob(['\uFEFF' + [headers.join(','), ...csvData].join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.setAttribute('href', url); link.setAttribute('download', `Dock_KPI_Report_${filterDate}.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.setAttribute('href', url); link.setAttribute('download', `Dock_Report.csv`); document.body.appendChild(link); link.click(); document.body.removeChild(link);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault(); const user = username.toLowerCase().trim(); const pass = password.trim();
     if (user === 'admin' && pass === '1234') { setCurrentView('admin'); setUsername(''); setPassword(''); }
-    else if (user === 'admintpt' && pass === '1234') { setCurrentView('yard'); setUsername(''); setPassword(''); }
-    else if (user === 'prt' && pass === '1234') { setCurrentView('shunt'); setShuntCompany('PRT'); setUsername(''); setPassword(''); }
-    else if (user === 'vcg' && pass === '1234') { setCurrentView('shunt'); setShuntCompany('VCG'); setUsername(''); setPassword(''); }
-    else if (user === 'dcreceive2' && pass === '1234') { setCurrentView('receiver'); setReceiverDC('DC2'); setUsername(''); setPassword(''); }
-    else if (user === 'dcreceive6' && pass === '1234') { setCurrentView('receiver'); setReceiverDC('DC6'); setUsername(''); setPassword(''); }
-    else if (user === 'dcreceive7' && pass === '1234') { setCurrentView('receiver'); setReceiverDC('DC7.2'); setUsername(''); setPassword(''); }
-    else if (user === 'tsw' && pass === '1234') { setCurrentView('unloader'); setUsername(''); setPassword(''); }
     else {
       const inputDigits = user.replace(/\D/g, ''); const passDigits = pass.replace(/\D/g, '');
       if (inputDigits && inputDigits === passDigits) {
@@ -173,46 +123,27 @@ function App() {
     }
   };
 
-  const handleLogout = () => { setCurrentView('login'); setReceiverDC(''); setDriverJobData(null); setShuntCompany(''); setCheckInModal(null); setPlanSearchQuery(''); };
-
-  const handleCreateYardOrder = async (e: React.FormEvent) => {
-    e.preventDefault(); if (!yardCompanyId || !yardContainerNo || !yardOrigin || !yardDestination) return;
-    setLoading(true);
-    try {
-      await supabase.from('orders').insert([{ company_id: yardCompanyId, container_no: yardContainerNo.toUpperCase(), origin: yardOrigin.toUpperCase(), destination: yardDestination.toUpperCase(), status: 'pending' }]);
-      alert(`✅ สั่งลากตู้สำเร็จ!`); setYardContainerNo(''); setYardOrigin(''); setYardDestination(''); setYardCompanyId(''); fetchYardOrders();
-    } catch (error: any) { alert(`❌ เกิดข้อผิดพลาด`); } finally { setLoading(false); }
-  };
-
-  const handleCompleteShuntOrder = async (orderId: string, containerNo: string, destination: string, origin: string) => {
-    try {
-      await supabase.from('orders').update({ status: 'completed' }).eq('id', orderId);
-      const { data: bJobsIn } = await supabase.from('backhaul_jobs').select('*, daily_plan(*)').eq('status', 'Assigned').eq('dock_number', destination);
-      if (bJobsIn && bJobsIn.length > 0) { const match = bJobsIn.find(j => (j.daily_plan?.trailer_plate || j.daily_plan?.license_plate || '') === containerNo); if (match) await executeStatusUpdate(match.id, { status: 'On Dock', on_dock_time: new Date().toISOString() }); }
-      if (destination === 'ตู้เปล่า') {
-        const { data: bJobsOut } = await supabase.from('backhaul_jobs').select('*, daily_plan(*)').eq('status', 'End Load').eq('dock_number', origin);
-        if (bJobsOut && bJobsOut.length > 0) { const matchOut = bJobsOut.find(j => (j.daily_plan?.trailer_plate || j.daily_plan?.license_plate || '') === containerNo); if (matchOut) await executeStatusUpdate(matchOut.id, { status: 'Off Dock', finish_time: new Date().toISOString() }); }
-      }
-      fetchShuntOrders();
-    } catch (error) { alert('❌ เกิดข้อผิดพลาด'); }
-  };
+  const handleLogout = () => { setCurrentView('login'); setDriverJobData(null); setCheckInModal(null); setPlanSearchQuery(''); };
 
   const handleSavePlan = async (e: React.FormEvent) => {
-    e.preventDefault(); setLoading(true);
+    e.preventDefault();
     try {
       const { id, ...payloadWithoutId } = planForm;
       const isEdit = !!id;
-      if (isEdit) { await supabase.from('daily_plan').update(planForm).eq('id', id); alert('✅ อัปเดตข้อมูลสำเร็จ'); } 
-      else { await supabase.from('daily_plan').insert([payloadWithoutId]); alert('✅ เพิ่มรายการรถสำเร็จ'); }
+      if (isEdit) { await supabase.from('daily_plan').update(planForm).eq('id', id); alert('✅ อัปเดตสำเร็จ'); } 
+      else { await supabase.from('daily_plan').insert([payloadWithoutId]); alert('✅ เพิ่มรายการสำเร็จ'); }
       setShowPlanForm(false); fetchDailyPlans();
-    } catch (error) { alert('❌ เกิดข้อผิดพลาดในการบันทึกข้อมูล'); } finally { setLoading(false); }
+    } catch (error) { alert('❌ เกิดข้อผิดพลาด'); }
   };
 
-  const handleCancelPlan = async (id: string) => { const confirmCancel = window.confirm('ยกเลิกงานนี้?'); if (!confirmCancel) return; try { await supabase.from('daily_plan').delete().eq('id', id); fetchDailyPlans(); } catch (error) {} };
+  const handleCancelPlan = async (id: string) => { 
+    if (!window.confirm('ยืนยันการลบแผนงานนี้?')) return; 
+    try { await supabase.from('daily_plan').delete().eq('id', id); fetchDailyPlans(); } catch (error) {} 
+  };
 
   const handleCheckIn = async () => {
     if (!checkInModal || !checkInModal.selectedDC) { alert('❌ เลือกคลัง'); return; }
-    setLoading(true); const planData = checkInModal.plan; const selectedDC = checkInModal.selectedDC;
+    const planData = checkInModal.plan; const selectedDC = checkInModal.selectedDC;
     try {
       const isT18W = planData.transport_type === 'T18W'; const isSpecialCompany = planData.transport_company?.includes('พรอรุณ') || planData.transport_company?.includes('คาร์โก้');
       let queueNo = ''; const dd = String(new Date().getDate()).padStart(2, '0'); const mm = String(new Date().getMonth() + 1).padStart(2, '0');
@@ -220,20 +151,20 @@ function App() {
       if (!(isT18W && isSpecialCompany)) { const { count } = await supabase.from('backhaul_jobs').select('*', { count: 'exact', head: true }).like('queue_number', `${prefix}%`); queueNo = `${prefix}${String((count || 0) + 1).padStart(3, '0')}`; } 
       else { queueNo = `${dcNum}-VIP`; }
       const { data: existing } = await supabase.from('backhaul_jobs').select('id').eq('daily_plan_id', planData.id).neq('status', 'Finish').limit(1);
-      if (existing && existing.length > 0) { alert('⚠️ Check-in ไปแล้ว'); setCheckInModal(null); setLoading(false); return; }
+      if (existing && existing.length > 0) { alert('⚠️ Check-in ไปแล้ว'); setCheckInModal(null); return; }
       await supabase.from('backhaul_jobs').insert([{ daily_plan_id: planData.id, queue_number: queueNo, status: 'Call Up' }]);
       alert(`✅ เช็คอินสำเร็จ!`); setCheckInModal(null); fetchAllJobs();
-    } catch (error: any) { alert('❌ เกิดข้อผิดพลาด'); } finally { setLoading(false); }
+    } catch (error: any) { alert('❌ เกิดข้อผิดพลาด'); }
   };
 
   const executeStatusUpdate = async (jobId: string, updateData: any) => {
-    try { await supabase.from('backhaul_jobs').update(updateData).eq('id', jobId); if (currentView === 'admin') fetchAllJobs(); if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs(); if (currentView === 'driver') fetchDriverJob(); } catch (error) {}
+    try { await supabase.from('backhaul_jobs').update(updateData).eq('id', jobId); if (currentView === 'admin') fetchAllJobs(); if (currentView === 'driver') fetchDriverJob(); } catch (error) {}
   };
 
   const releaseDocks = async (jobId: string) => { try { await supabase.from('master_docks').update({ status: 'Available', current_job_id: null, current_plate: null }).eq('current_job_id', jobId); } catch (error) {} };
 
   const handleUpdateStatus = async (job: any, currentStatus: string) => {
-    const activeStatus = currentStatus === 'Waiting Unload' ? 'Call Up' : currentStatus; let nextStatus = ''; let updateData: any = {};
+    const activeStatus = currentStatus; let nextStatus = ''; let updateData: any = {};
     if (activeStatus === 'Call Up') {
       const isTrailer = job.daily_plan?.transport_type === 'T6WT' || job.daily_plan?.transport_type === 'T10WT'; const requiredCount = isTrailer ? 2 : 1; const bhGroup = getDCRoute(job.queue_number);
       const { data } = await supabase.from('master_docks').select('*').eq('bh_group', bhGroup).in('allowed_type', ['Inbound', 'Both']).order('dock_no', { ascending: true });
@@ -241,10 +172,10 @@ function App() {
     } 
     else if (activeStatus === 'Assigned') { nextStatus = 'On Dock'; updateData = { status: nextStatus, on_dock_time: new Date().toISOString() }; }
     else if (activeStatus === 'On Dock') { nextStatus = 'Unloading'; updateData = { status: nextStatus, start_load_time: new Date().toISOString() }; }
-    else if (activeStatus === 'Unloading') { setMultiDropConfig({ job: job, step: 'ask' }); return; }
+    else if (activeStatus === 'Unloading') { nextStatus = 'End Load'; updateData = { status: nextStatus, end_load_time: new Date().toISOString() }; }
     else if (activeStatus === 'End Load') { nextStatus = 'Off Dock'; updateData = { status: nextStatus, finish_time: new Date().toISOString() }; await releaseDocks(job.id); }
     else if (activeStatus === 'Off Dock') { nextStatus = 'Finish'; updateData = { status: nextStatus }; }
-    if (nextStatus) { await executeStatusUpdate(job.id, updateData); if (nextStatus === 'On Dock' || nextStatus === 'Off Dock') { try { await supabase.from('orders').update({ status: 'completed' }).eq('container_no', job.daily_plan?.trailer_plate || '-').eq('status', 'pending'); } catch (e) {} } }
+    if (nextStatus) { await executeStatusUpdate(job.id, updateData); }
   };
 
   const handleConfirmDock = async () => {
@@ -252,24 +183,7 @@ function App() {
     const { job, selectedDocks } = dockModal; const dockNo = selectedDocks.join(', ');
     await executeStatusUpdate(job.id, { status: 'Assigned', dock_number: dockNo, call_time: new Date().toISOString() });
     await supabase.from('master_docks').update({ status: 'Occupied', current_job_id: job.id, current_plate: getDisplayPlate(job.daily_plan) }).in('dock_no', selectedDocks);
-    const cName = job.daily_plan?.transport_company || ''; let sId = null;
-    if (cName.includes('พรอรุณ') || cName.includes('PRT')) { sId = companiesList.find(c => JSON.stringify(c).toLowerCase().includes('prt'))?.id; }
-    else if (cName.includes('คาร์โก้') || cName.includes('VCG')) { sId = companiesList.find(c => JSON.stringify(c).toLowerCase().includes('vcg'))?.id; }
-    if (sId && job.daily_plan?.transport_type === 'T18W') { await supabase.from('orders').insert([{ company_id: sId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: dockNo, status: 'pending' }]); }
     setDockModal(null);
-  };
-
-  const handleMultiDropChoice = async (choice: 'yes' | 'no', nextDC?: string) => {
-    if (!multiDropConfig) return; const job = multiDropConfig.job;
-    if (choice === 'no') {
-      setMultiDropConfig(null); await executeStatusUpdate(job.id, { status: 'End Load', end_load_time: new Date().toISOString() });
-      const cName = job.daily_plan?.transport_company || ''; let sId = null;
-      if (cName.includes('พรอรุณ') || cName.includes('PRT')) { sId = companiesList.find(c => JSON.stringify(c).toLowerCase().includes('prt'))?.id; }
-      else if (cName.includes('คาร์โก้') || cName.includes('VCG')) { sId = companiesList.find(c => JSON.stringify(c).toLowerCase().includes('vcg'))?.id; }
-      if (sId && job.daily_plan?.transport_type === 'T18W') { await supabase.from('orders').insert([{ company_id: sId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: 'ตู้เปล่า', status: 'pending' }]); }
-    } else if (choice === 'yes' && nextDC) {
-      setMultiDropConfig(null); await executeStatusUpdate(job.id, { status: 'Call Up', queue_number: `${(job.queue_number || '').split(' (')[0]} (${getDCRoute(job.queue_number)} -> ${nextDC})` }); await releaseDocks(job.id);
-    }
   };
 
   const handleRollbackStatus = async (jobId: string, currentStatus: string) => {
@@ -285,7 +199,7 @@ function App() {
 
   const renderActionButton = (job: any) => {
     if (job.status === 'Finish') return <span style={{ color: '#2e7d32', fontWeight: 'bold' }}>✅ เสร็จสิ้น</span>;
-    const active = job.status === 'Waiting Unload' ? 'Call Up' : job.status;
+    const active = job.status;
     const btnMap: any = { 'Call Up': ['📢 Assign Dock', 'call-up'], 'Assigned': ['🚚 รถเข้า Dock', 'assigned'], 'On Dock': ['📦 เริ่มลงสินค้า', 'on-dock'], 'Unloading': ['✅ ลงสินค้าจบ', 'unloading'], 'End Load': ['🔙 ถอยออกจาก Dock', 'end-load'], 'Off Dock': ['🏁 Check Out', 'off-dock'] };
     return btnMap[active] ? (
       <div className="action-stack">
@@ -297,9 +211,7 @@ function App() {
 
   const getDisplayPlate = (plan: any) => { if (!plan) return '-'; if (plan.transport_type === 'T18W') return plan.trailer_plate || '-'; if (plan.transport_type === 'T6WT' || plan.transport_type === 'T10WT') return `${plan.license_plate || '-'} / ${plan.trailer_plate || '-'}`; return plan.license_plate || '-'; };
   const displayQueue = (q: string | null) => (!q || q.includes('VIP')) ? '-' : q.split(' (')[0];
-  const getShortQueue = (q: string | null) => { if (!q) return '-'; const b = q.split(' (')[0]; return b.includes('VIP') ? '-' : b.split('-')[2] || b; };
   const getDCRoute = (q: string | null) => { if (!q) return '-'; const m = q.match(/\((.*)\)/); return m ? m[1] : (q.startsWith('2-') ? 'DC2' : q.startsWith('6-') ? 'DC6' : 'DC7.2'); };
-  const getDCFromQueue = (q: string | null) => { if (!q) return '-'; const m = q.match(/\((.*)\)/); if (m) { const r = m[1].split(' -> '); return r[r.length - 1]; } return q.startsWith('2-') ? 'DC2' : q.startsWith('6-') ? 'DC6' : 'DC7.2'; };
   
   const filteredPlans = dailyPlans.filter(p => !planSearchQuery || (p.license_plate?.toLowerCase().includes(planSearchQuery.toLowerCase()) || p.vendor_name?.toLowerCase().includes(planSearchQuery.toLowerCase()) || p.vendor_code?.toLowerCase().includes(planSearchQuery.toLowerCase()) || p.job_no?.toLowerCase().includes(planSearchQuery.toLowerCase()) || p.transport_summary_no?.toLowerCase().includes(planSearchQuery.toLowerCase())));
   const isPlanCheckedIn = (planId: string) => allJobs.some(job => job.daily_plan_id === planId && job.status !== 'Finish');
@@ -346,6 +258,18 @@ function App() {
   return (
     <div className="container">
       <div className="top-bar"><span>👤 เข้าระบบโดย: <strong>{currentView.toUpperCase()}</strong></span><button className="btn-logout" onClick={handleLogout}>🚪 ออกจากระบบ</button></div>
+      
+      {currentView === 'driver' && driverJobData && (
+        <div className="card driver-view">
+          <h2>สถานะงานของคุณ</h2>
+          <div className="status-box">
+             <p>ทะเบียน: <strong>{getDisplayPlate(driverJobData.daily_plan)}</strong></p>
+             <p>ช่องจอด: <strong>{driverJobData.dock_number || 'รอคิว'}</strong></p>
+             <p>สถานะปัจจุบัน: <strong style={{color:'#1976d2', fontSize: '20px'}}>{driverJobData.status}</strong></p>
+          </div>
+        </div>
+      )}
+
       {currentView === 'admin' && (
         <div className="card" style={{ padding: '20px' }}>
           <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
@@ -372,6 +296,7 @@ function App() {
                       <td>{isPlanCheckedIn(plan.id) ? '✅ Checked In' : '⏳ Pending'}</td>
                       <td>
                         {!isPlanCheckedIn(plan.id) && <button onClick={() => setCheckInModal({ isOpen: true, plan, selectedDC: '' })} className="btn-action assigned">🟢 Check-In</button>}
+                        <button onClick={() => handleCancelPlan(plan.id)} style={{marginLeft: '10px', background: '#ef4444', color: 'white', padding: '5px 10px', border: 'none', borderRadius: '4px'}}>ลบ</button>
                       </td>
                     </tr>
                   ))}
@@ -409,7 +334,6 @@ function App() {
         </div>
       )}
 
-      {/* Modals & Other Views (Receiver, Yard, Shunt) ... */}
       {checkInModal?.isOpen && (
         <div className="modal-overlay"><div className="modal-card">
           <h3>เลือกคลังสินค้า</h3>
