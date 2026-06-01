@@ -89,14 +89,18 @@ function App() {
   };
 
   const fetchCompanies = async () => { const { data } = await supabase.from('companies').select('*'); if (data) setCompaniesList(data); };
+  
   const fetchAllJobs = async () => {
     const startOfDay = `${filterDate}T00:00:00.000Z`; const endOfDay = `${filterDate}T23:59:59.999Z`; const todayStr = new Date().toISOString().split('T')[0];
     let query = supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).order('check_in_time', { ascending: true });
     if (filterDate === todayStr) { query = query.or(`and(check_in_time.gte.${startOfDay},check_in_time.lte.${endOfDay}),status.neq.Finish`); } else { query = query.gte('check_in_time', startOfDay).lte('check_in_time', endOfDay); }
     const { data } = await query; if (data) setAllJobs(data);
   };
+
   const fetchDailyPlans = async () => { const { data } = await supabase.from('daily_plan').select('*').order('id', { ascending: false }).limit(300); if (data) setDailyPlans(data); };
+  
   const fetchMasterDocksList = async () => { const { data } = await supabase.from('master_docks').select('*').order('dock_no', { ascending: true }); if (data) setMasterDocksList(data); };
+  
   const fetchWaitingJobs = async () => {
     const { data, error } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).neq('status', 'Finish').order('check_in_time', { ascending: true });
     if (error || !data) return;
@@ -109,6 +113,7 @@ function App() {
     }
     setWaitingJobs(filtered);
   };
+
   const fetchDriverJob = async () => {
     if (!driverJobData) return;
     const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).eq('daily_plan_id', driverJobData.daily_plan_id).neq('status', 'Finish').order('check_in_time', { ascending: false }).limit(1).single();
@@ -116,15 +121,41 @@ function App() {
        alert('🏁 งานของคุณเสร็จสิ้นครบทุกคลังเรียบร้อยแล้ว!'); handleLogout();
     }
   };
+
   const fetchYardOrders = async () => {
     if (currentView !== 'yard') return; const { data, error } = await supabase.from('orders').select(`*, companies(*)`).eq('status', 'pending').order('created_at', { ascending: false }); if (data && !error) setYardOrders(data);
   };
+
+  // 💡 [แก้ไข] ฟังก์ชันดึงงาน Shunt (รองรับภาษาไทย)
   const fetchShuntOrders = async () => {
     if (currentView !== 'shunt' || !shuntCompany) return;
-    const comp = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes(shuntCompany.toLowerCase()));
+    
+    // ค้นหาบริษัทให้ฉลาดขึ้น (ดักจับทั้งไทยและอังกฤษ)
+    const comp = companiesList.find((c) => {
+      const str = JSON.stringify(c).toLowerCase();
+      if (shuntCompany === 'PRT') return str.includes('prt') || str.includes('พรอรุณ');
+      if (shuntCompany === 'VCG') return str.includes('vcg') || str.includes('คาร์โก้');
+      return str.includes(shuntCompany.toLowerCase());
+    });
+
     let query = supabase.from('orders').select('*, companies(*)').eq('status', 'pending').order('created_at', { ascending: true });
-    if (comp) query = query.eq('company_id', comp.id);
-    const { data, error } = await query; if (data && !error) { setShuntOrders(data.filter((o) => o.company_id === comp?.id)); }
+    
+    if (comp) {
+      query = query.eq('company_id', comp.id);
+      const { data, error } = await query;
+      if (data && !error) setShuntOrders(data);
+    } else {
+      // ถ้าหา ID บริษัทไม่เจอ ให้ดึงมาทั้งหมดแล้วกรอง
+      const { data, error } = await query;
+      if (data && !error) {
+        setShuntOrders(data.filter((o) => {
+          const cName = (o.companies?.name || o.companies?.code || o.companies?.company_name || '').toLowerCase();
+          if (shuntCompany === 'PRT') return cName.includes('prt') || cName.includes('พรอรุณ');
+          if (shuntCompany === 'VCG') return cName.includes('vcg') || cName.includes('คาร์โก้');
+          return false;
+        }));
+      }
+    }
   };
 
   useEffect(() => {
@@ -134,6 +165,7 @@ function App() {
     if (currentView === 'driver') fetchDriverJob();
     if (currentView === 'yard') fetchYardOrders();
     if (currentView === 'shunt') fetchShuntOrders();
+    
     const timer = setInterval(() => {
       if (currentView === 'admin') { fetchAllJobs(); fetchDailyPlans(); fetchMasterDocksList(); }
       if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs();
@@ -144,7 +176,6 @@ function App() {
     return () => clearInterval(timer);
   }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
 
-  // 💡 Export CSV สำหรับรถ 1 คันที่ลงได้สูงสุด 5 คลัง (กางข้อมูลแนวนอนให้)
   const handleExportCSV = () => {
     if (allJobs.length === 0) { alert('ไม่มีข้อมูลให้ Export ครับ'); return; }
     
@@ -324,16 +355,28 @@ function App() {
     const { job, selectedDocks } = dockModal; 
     const dockNo = selectedDocks.join(', ');
     
-    // 💡 ไม่ต้องเอาประวัติมาต่อท้ายแล้ว เซฟแค่ช่องปัจจุบันก็พอ (เดี๋ยวโค้ดหน้าจอจะเอามาต่อให้เอง)
     const updateData = { status: 'Assigned', dock_number: dockNo, call_time: new Date().toISOString(), };
     await executeStatusUpdate(job.id, updateData);
 
     const plate = getDisplayPlate(job.daily_plan);
     await supabase.from('master_docks').update({ status: 'Occupied', current_job_id: job.id, current_plate: plate, }).in('dock_no', selectedDocks);
     
-    const companyName = job.daily_plan?.transport_company || ''; let shuntCompanyId = null; const transportType = job.daily_plan?.transport_type || '';
-    if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt')); if (prt) shuntCompanyId = prt.id; } else if (companyName.includes('คาร์โก้') || companyName.includes('VCG')) { const vcg = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('vcg')); if (vcg) shuntCompanyId = vcg.id; }
-    if (shuntCompanyId && transportType === 'T18W') { await supabase.from('orders').insert([{ company_id: shuntCompanyId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: dockNo, status: 'pending', },]); }
+    // 💡 [แก้ไข] ดักชื่อบริษัทภาษาไทยตอน Assign Dock
+    const companyName = job.daily_plan?.transport_company || ''; 
+    let shuntCompanyId = null; 
+    const transportType = job.daily_plan?.transport_type || '';
+
+    if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { 
+      const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt') || JSON.stringify(c).includes('พรอรุณ')); 
+      if (prt) shuntCompanyId = prt.id; 
+    } else if (companyName.includes('คาร์โก้') || companyName.includes('VCG')) { 
+      const vcg = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('vcg') || JSON.stringify(c).includes('คาร์โก้')); 
+      if (vcg) shuntCompanyId = vcg.id; 
+    }
+
+    if (shuntCompanyId && transportType === 'T18W') { 
+      await supabase.from('orders').insert([{ company_id: shuntCompanyId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: dockNo, status: 'pending', },]); 
+    }
     setDockModal(null);
   };
 
@@ -343,17 +386,26 @@ function App() {
 
     if (choice === 'no') {
       setMultiDropConfig(null); await executeStatusUpdate(job.id, { status: 'End Load', end_load_time: now, });
-      const companyName = job.daily_plan?.transport_company || ''; let shuntCompanyId = null;
-      if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt')); if (prt) shuntCompanyId = prt.id; } else if (companyName.includes('คาร์โก้') || companyName.includes('VCG')) { const vcg = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('vcg')); if (vcg) shuntCompanyId = vcg.id; }
-      if (shuntCompanyId && transportType === 'T18W') { await supabase.from('orders').insert([{ company_id: shuntCompanyId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: 'ตู้เปล่า', status: 'pending', },]); }
+      
+      // 💡 [แก้ไข] ดักชื่อบริษัทภาษาไทยตอนสร้างงานลากตู้เปล่า
+      const companyName = job.daily_plan?.transport_company || ''; 
+      let shuntCompanyId = null;
+      if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { 
+        const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt') || JSON.stringify(c).includes('พรอรุณ')); 
+        if (prt) shuntCompanyId = prt.id; 
+      } else if (companyName.includes('คาร์โก้') || companyName.includes('VCG')) { 
+        const vcg = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('vcg') || JSON.stringify(c).includes('คาร์โก้')); 
+        if (vcg) shuntCompanyId = vcg.id; 
+      }
+
+      if (shuntCompanyId && transportType === 'T18W') { 
+        await supabase.from('orders').insert([{ company_id: shuntCompanyId, container_no: job.daily_plan?.trailer_plate || '-', origin: job.dock_number || 'ลานจอด', destination: 'ตู้เปล่า', status: 'pending', },]); 
+      }
     } else if (choice === 'yes' && nextDC) {
       setMultiDropConfig(null); let baseQueue = (job.queue_number || '').split(' (')[0]; let currentRoute = getDCRoute(job.queue_number);
-      
-      // 💡 1. ปิดจ๊อบคลังแรกทันที เพื่อสต๊าฟเวลาทั้งหมดเอาไว้สำหรับออก Report CSV
       await executeStatusUpdate(job.id, { status: 'Finish', end_load_time: now, finish_time: now }); 
       await releaseDocks(job.id);
 
-      // 💡 2. แอบสร้างบรรทัดใหม่ เพื่อไปจับเวลารอคิวที่คลังสองต่อ (หน้าจอจะถูกกรุ๊ปรวมกันไม่ให้แอดมินเห็น)
       await supabase.from('backhaul_jobs').insert([{ 
         daily_plan_id: job.daily_plan_id, 
         queue_number: `${baseQueue} (${currentRoute} -> ${nextDC})`, 
@@ -401,10 +453,7 @@ function App() {
 
   const getExecDashboardKPIs = () => {
     const dailyPlansToday = dailyPlans.filter(p => true);
-    
-    // 💡 นับจำนวนรถจาก Plan จริงๆ ไม่ให้เบิ้ล
     const uniquePlansCheckIn = new Set(allJobs.map(j => j.daily_plan_id));
-
     const totalPlan = dailyPlansToday.length;
     const totalCheckIn = uniquePlansCheckIn.size;
     const notArrived = Math.max(0, totalPlan - totalCheckIn);
@@ -416,7 +465,6 @@ function App() {
     const dcStats: any = {};
     MASTER_DCS.forEach(dc => dcStats[dc] = { waitSum: 0, waitCount: 0, loadSum: 0, loadCount: 0 });
 
-    // คำนวณเวลาเฉลี่ยจากทุกครั้งที่มีการลงของ
     allJobs.forEach((job) => {
       const dc = getDCFromQueue(job.queue_number);
       if (job.call_time && job.check_in_time) {
@@ -435,7 +483,6 @@ function App() {
       }
     });
 
-    // 💡 ดึงเฉพาะสถานะล่าสุดของรถแต่ละคันมาคิดเปอร์เซ็นต์ เพื่อไม่ให้ยอดรวมเกิน
     const latestJobs = Object.values(allJobs.reduce((acc: any, job: any) => {
       acc[job.daily_plan_id] = job;
       return acc;
@@ -525,14 +572,13 @@ function App() {
   const execData = getExecDashboardKPIs();
   const utilData = getDockUtilization();
 
-  // 💡 ตัวกรองซ่อนบรรทัดให้หน้าจอ Admin Dashboard รวบเหลือบรรทัดเดียว
   const displayJobs = Object.values(allJobs.reduce((acc: any, job: any) => {
     const pId = job.daily_plan_id;
     if (!acc[pId]) {
       acc[pId] = { ...job, combined_docks: job.dock_number ? [job.dock_number] : [] };
     } else {
       const newDocks = job.dock_number ? [...acc[pId].combined_docks, job.dock_number] : acc[pId].combined_docks;
-      acc[pId] = { ...job, combined_docks: newDocks }; // อัปเดตทับเป็นข้อมูลล่าสุด แต่เก็บ history ประตูไว้โชว์
+      acc[pId] = { ...job, combined_docks: newDocks }; 
     }
     return acc;
   }, {}));
@@ -677,7 +723,6 @@ function App() {
                 <table className="dashboard-table">
                   <thead> <tr> <th>เวลา Check In</th> <th>Queue</th> <th>ลงสินค้า</th> <th>ทะเบียนรถ</th> <th>บริษัทขนส่ง</th> <th>ประเภทรถ</th> <th>Vendor</th> <th>Dock (ประวัติ)</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
-                    {/* 💡 วนลูปโชว์ข้อมูลจาก displayJobs (ที่มีบรรทัดเดียว) แทน allJobs */}
                     {(displayJobs as any[]).map((job) => (
                       <tr key={job.id}>
                         <td> {new Date(job.check_in_time).toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', })} น. </td>
@@ -719,7 +764,7 @@ function App() {
                           <span style={{color: '#64748b'}}>Inbound Usage:</span>
                           <strong style={{color: '#ef4444'}}>{data.occIn}/{data.totalIn} บาน ({pctIn}%)</strong>
                        </div>
-                       <div style={{ fontSize: '12px', color: '#94a3b8' }}>* อัตราการใช้งานคำนวณจากสถานะ Occupied ของประตูฝั่ง Inbound ที่เปิดใช้งาน</div>
+                       <div style={{ fontSize: '12px', color: '#94a3b8' }}></div>
                     </div>
                   );
                 })}
