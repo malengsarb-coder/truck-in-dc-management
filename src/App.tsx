@@ -27,12 +27,17 @@ function App() {
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    
+    // 1. เพิ่มแจ้งเตือนว่ากำลังอ่านไฟล์
+    alert(`⏳ กำลังอ่านไฟล์: ${file.name} ...`); 
+    
     const reader = new FileReader();
     reader.onload = async (event) => {
       try {
         const text = event.target?.result as string;
         const rows = text.split('\n').map(row => row.trim()).filter(row => row);
-        if (rows.length < 2) throw new Error('ไฟล์ว่างเปล่า');
+        if (rows.length < 2) throw new Error('ไฟล์ว่างเปล่า หรือมีแค่หัวตาราง');
+        
         const parseCSVLine = (str: string) => {
           const arr = []; let quote = false; let col = '';
           for (let i = 0; i < str.length; i++) {
@@ -42,36 +47,49 @@ function App() {
           }
           arr.push(col.trim()); return arr;
         };
+        
         const headers = parseCSVLine(rows[0]).map(h => h.replace(/^"|"$/g, '').replace(/^\uFEFF/, '').toLowerCase().trim());
         const getCol = (cols: string[], possibleNames: string[]) => {
           const index = headers.findIndex(h => possibleNames.includes(h));
           return index !== -1 ? cols[index] : '';
         };
+        
         const insertData = [];
         for (let i = 1; i < rows.length; i++) {
           const cols = parseCSVLine(rows[i]);
           const payload = {
-            transport_summary_no: getCol(cols, ['transport_summary_no', 'summary']),
-            job_no: getCol(cols, ['job_no', 'job']),
-            vendor_code: getCol(cols, ['vendor_code']),
-            vendor_name: getCol(cols, ['vendor_name', 'vendor']),
-            transport_type: getCol(cols, ['transport_type', 'type']),
-            license_plate: getCol(cols, ['license_plate', 'license']),
-            trailer_plate: getCol(cols, ['trailer_plate', 'trailer']),
-            driver_name: getCol(cols, ['driver_name', 'driver']),
-            transport_company: getCol(cols, ['transport_company', 'company']),
-            appointment_no: getCol(cols, ['appointment_no', 'appointment']),
+            // 2. เพิ่มตัวจับคำภาษาไทยที่ใช้บ่อยในงานโลจิสติกส์
+            transport_summary_no: getCol(cols, ['transport_summary_no', 'summary', 'เลขที่เอกสาร', 'เลขที่สรุป']),
+            job_no: getCol(cols, ['job_no', 'job', 'เลขที่งาน', 'รหัสงาน']),
+            vendor_code: getCol(cols, ['vendor_code', 'รหัสผู้ขาย', 'รหัสผู้จัดจำหน่าย']),
+            vendor_name: getCol(cols, ['vendor_name', 'vendor', 'ชื่อผู้ขาย', 'ชื่อร้าน']),
+            transport_type: getCol(cols, ['transport_type', 'type', 'ประเภทรถ', 'ชนิดรถ']),
+            license_plate: getCol(cols, ['license_plate', 'license', 'ทะเบียนรถ', 'ทะเบียนรถหัว']),
+            trailer_plate: getCol(cols, ['trailer_plate', 'trailer', 'ทะเบียนหาง']),
+            driver_name: getCol(cols, ['driver_name', 'driver', 'ชื่อคนขับ', 'พขร']),
+            transport_company: getCol(cols, ['transport_company', 'company', 'บริษัทขนส่ง']),
+            appointment_no: getCol(cols, ['appointment_no', 'appointment', 'เลขที่นัดหมาย']),
           };
+          // บังคับว่าต้องมี ทะเบียนรถ หรือ Job No อย่างใดอย่างหนึ่งถึงจะดึงเข้าข้อมูล
           if (payload.license_plate || payload.job_no) insertData.push(payload);
         }
+        
         if (insertData.length > 0) {
           const { error } = await supabase.from('daily_plan').insert(insertData);
-          if (error) throw error; alert(`✅ นำเข้าสำเร็จ ${insertData.length} รายการ!`); fetchDailyPlans(); 
+          if (error) throw error; 
+          alert(`✅ นำเข้าข้อมูลสำเร็จ ${insertData.length} รายการ!`); 
+          fetchDailyPlans(); 
+        } else {
+          // 3. เพิ่มแจ้งเตือนกรณีข้อมูลไม่ตรง
+          alert('⚠️ นำเข้าไม่สำเร็จ! ไม่พบข้อมูลหัวตารางที่ตรงกับระบบ (ตรวจดูไฟล์ CSV ว่าต้องมีคอลัมน์ชื่อ "job_no" หรือ "ทะเบียนรถ")');
         }
-      } catch (error: any) { alert(`❌ เกิดข้อผิดพลาด: ${error.message}`); } finally {
+      } catch (error: any) { 
+        alert(`❌ เกิดข้อผิดพลาด: ${error.message}`); 
+      } finally {
         if (fileInputRef.current) fileInputRef.current.value = ''; 
       }
     };
+    // กรณีที่ไฟล์ภาษาไทยมีปัญหาตัวอักษรต่างดาว อาจจะต้องเปลี่ยน UTF-8 เป็น TIS-620 ในอนาคต
     reader.readAsText(file, 'UTF-8');
   };
 
