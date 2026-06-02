@@ -23,6 +23,7 @@ function App() {
   const [yardOrders, setYardOrders] = useState<any[]>([]);
   const [shuntCompany, setShuntCompany] = useState('');
   const [shuntOrders, setShuntOrders] = useState<any[]>([]);
+  
   const [filterDate, setFilterDate] = useState(() => new Date().toISOString().split('T')[0]);
 
   const [dockModal, setDockModal] = useState<{ isOpen: boolean; job: any; docks: any[]; selectedDocks: string[]; requiredCount: number } | null>(null);
@@ -33,7 +34,7 @@ function App() {
   const [checkInModal, setCheckInModal] = useState<{ isOpen: boolean; plan: any; selectedDC: string } | null>(null);
   const [masterDocksList, setMasterDocksList] = useState<any[]>([]);
 
-  const initialPlanForm = { id: '', transport_summary_no: '', job_no: '', vendor_code: '', vendor_name: '', transport_type: '', license_plate: '', trailer_plate: '', driver_name: '', transport_company: '', appointment_no: '' };
+  const initialPlanForm = { id: '', schedule_date: '', transport_summary_no: '', job_no: '', subjobtype: '', vendor_code: '', vendor_name: '', transport_type: '', license_plate: '', trailer_plate: '', driver_name: '', transport_company: '', appointment_no: '' };
   const [showPlanForm, setShowPlanForm] = useState(false);
   const [planForm, setPlanForm] = useState(initialPlanForm);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -46,34 +47,68 @@ function App() {
     reader.onload = async (event) => {
       try {
         const text = event.target?.result as string;
-        const rows = text.split('\n').map((row) => row.trim()).filter((row) => row);
+        const rows = text.split(/\r?\n/).map((row) => row.trim()).filter((row) => row);
         if (rows.length < 2) throw new Error('ไฟล์ว่างเปล่า หรือไม่มีข้อมูล');
+        
+        let delimiter = ',';
+        if (rows[0].includes('\t')) delimiter = '\t';
+        else if (rows[0].includes(';') && !rows[0].includes(',')) delimiter = ';';
+
         const parseCSVLine = (str: string) => {
           const arr = []; let quote = false; let col = '';
           for (let i = 0; i < str.length; i++) {
-            if (str[i] === '"') { quote = !quote; } else if (str[i] === ',' && !quote) { arr.push(col.trim()); col = ''; } else { col += str[i]; }
+            if (str[i] === '"') { quote = !quote; } 
+            else if (str[i] === delimiter && !quote) { arr.push(col.trim()); col = ''; } 
+            else { col += str[i]; }
           }
           arr.push(col.trim()); return arr;
         };
+
         const headers = parseCSVLine(rows[0]).map((h) => h.replace(/^"|"$/g, '').replace(/^\uFEFF/, '').toLowerCase().trim());
         const getCol = (cols: string[], possibleNames: string[]) => {
           const index = headers.findIndex((h) => possibleNames.includes(h));
-          return index !== -1 ? cols[index] : '';
+          return (index !== -1 && cols[index]) ? String(cols[index]).trim() : '';
         };
+
         const insertData = [];
         for (let i = 1; i < rows.length; i++) {
           const cols = parseCSVLine(rows[i]);
+          if (cols.length < 2) continue; 
+          
+          let license = getCol(cols, ['license_plate', 'ทะเบียนหัว', 'license', 'ทะเบียนรถ']);
+          if (license.toLowerCase().includes('รอ assign')) { license = ''; }
+
+          let rawDate = getCol(cols, ['schedule_date', 'schedule date', 'วันที่', 'วันที่จัดส่ง', 'วันที่แผน']);
+          let formattedDate = filterDate; 
+          if (rawDate) {
+            if (rawDate.includes('/')) {
+              const p = rawDate.split(' ')[0].split('/'); 
+              if (p.length === 3) {
+                let y = parseInt(p[2]);
+                if (y > 2500) y -= 543; 
+                else if (y < 100) y += 2000; 
+                let m = p[1].padStart(2, '0');
+                let d = p[0].padStart(2, '0');
+                formattedDate = `${y}-${m}-${d}`;
+              }
+            } else if (rawDate.includes('-')) {
+               formattedDate = rawDate.split(' ')[0]; 
+            }
+          }
+
           const payload = {
-            transport_summary_no: getCol(cols, ['transport_summary_no', 'summary']),
-            job_no: getCol(cols, ['job_no', 'job']),
-            vendor_code: getCol(cols, ['vendor_code']),
-            vendor_name: getCol(cols, ['vendor_name', 'vendor']),
-            transport_type: getCol(cols, ['transport_type', 'type']),
-            license_plate: getCol(cols, ['license_plate', 'license']),
-            trailer_plate: getCol(cols, ['trailer_plate', 'trailer']),
-            driver_name: getCol(cols, ['driver_name', 'driver']),
-            transport_company: getCol(cols, ['transport_company', 'company']),
-            appointment_no: getCol(cols, ['appointment_no', 'appointment']),
+            schedule_date: formattedDate,
+            transport_summary_no: getCol(cols, ['transport_summary_no', 'เลขที่ transport summary bh', 'transport summary no', 'summary']),
+            job_no: getCol(cols, ['job_no', 'bh job no', 'job no', 'job', 'เลขที่งาน']),
+            subjobtype: getCol(cols, ['subjobtype', 'sub job type']),
+            vendor_code: getCol(cols, ['vendor_code', 'จุดรับสินค้า', 'vendor code']),
+            vendor_name: getCol(cols, ['vendor_name', 'ชื่อจุดรับสินค้า', 'vendor name', 'vendor']),
+            transport_type: getCol(cols, ['transport_type', 'ประเภทรถที่ปล่อย', 'ประเภทรถ', 'type']),
+            license_plate: license,
+            trailer_plate: getCol(cols, ['trailer_plate', 'ทะเบียนหาง', 'trailer plate', 'trailer']),
+            driver_name: getCol(cols, ['driver_name', 'ชื่อ พขร', 'ชื่อ พขร.', 'ชื่อพขร.', 'driver']),
+            transport_company: getCol(cols, ['transport_company', 'บริษัทขนส่ง', 'transport company', 'company']),
+            appointment_no: getCol(cols, ['appointment_no', 'เลขที่ appointment', 'appointment no', 'appointment']),
           };
           if (payload.license_plate || payload.job_no) { insertData.push(payload); }
         }
@@ -82,7 +117,7 @@ function App() {
           if (error) throw error;
           alert(`✅ นำเข้าข้อมูลสำเร็จ ${insertData.length} รายการ!`);
           fetchDailyPlans();
-        } else { alert('⚠️ ไม่พบข้อมูลที่ตรงกับฟอร์แมตในไฟล์'); }
+        } else { alert('⚠️ ไม่พบข้อมูลที่ตรงกับฟอร์แมตในไฟล์ (ตรวจไม่พบคอลัมน์ job_no หรือ ข้อมูลว่างเปล่า)'); }
       } catch (error: any) { alert(`❌ เกิดข้อผิดพลาด: ${error.message}`); } finally { setLoading(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
     };
     reader.readAsText(file, 'UTF-8');
@@ -97,8 +132,15 @@ function App() {
     const { data } = await query; if (data) setAllJobs(data);
   };
 
-  const fetchDailyPlans = async () => { const { data } = await supabase.from('daily_plan').select('*').order('id', { ascending: false }).limit(300); if (data) setDailyPlans(data); };
-  
+  const fetchDailyPlans = async () => { 
+    const { data } = await supabase.from('daily_plan')
+      .select('*')
+      .eq('schedule_date', filterDate)
+      .order('id', { ascending: false })
+      .limit(500); 
+    if (data) setDailyPlans(data); 
+  };
+
   const fetchMasterDocksList = async () => { const { data } = await supabase.from('master_docks').select('*').order('dock_no', { ascending: true }); if (data) setMasterDocksList(data); };
   
   const fetchWaitingJobs = async () => {
@@ -117,35 +159,27 @@ function App() {
   const fetchDriverJob = async () => {
     if (!driverJobData) return;
     const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).eq('daily_plan_id', driverJobData.daily_plan_id).neq('status', 'Finish').order('check_in_time', { ascending: false }).limit(1).single();
-    if (data) { setDriverJobData(data); } else {
-       alert('🏁 งานของคุณเสร็จสิ้นครบทุกคลังเรียบร้อยแล้ว!'); handleLogout();
-    }
+    if (data) { setDriverJobData(data); } else { alert('🏁 งานของคุณเสร็จสิ้นครบทุกคลังเรียบร้อยแล้ว!'); handleLogout(); }
   };
 
   const fetchYardOrders = async () => {
     if (currentView !== 'yard') return; const { data, error } = await supabase.from('orders').select(`*, companies(*)`).eq('status', 'pending').order('created_at', { ascending: false }); if (data && !error) setYardOrders(data);
   };
 
-  // 💡 [แก้ไข] ฟังก์ชันดึงงาน Shunt (รองรับภาษาไทย)
   const fetchShuntOrders = async () => {
     if (currentView !== 'shunt' || !shuntCompany) return;
-    
-    // ค้นหาบริษัทให้ฉลาดขึ้น (ดักจับทั้งไทยและอังกฤษ)
     const comp = companiesList.find((c) => {
       const str = JSON.stringify(c).toLowerCase();
       if (shuntCompany === 'PRT') return str.includes('prt') || str.includes('พรอรุณ');
       if (shuntCompany === 'VCG') return str.includes('vcg') || str.includes('คาร์โก้');
       return str.includes(shuntCompany.toLowerCase());
     });
-
     let query = supabase.from('orders').select('*, companies(*)').eq('status', 'pending').order('created_at', { ascending: true });
-    
     if (comp) {
       query = query.eq('company_id', comp.id);
       const { data, error } = await query;
       if (data && !error) setShuntOrders(data);
     } else {
-      // ถ้าหา ID บริษัทไม่เจอ ให้ดึงมาทั้งหมดแล้วกรอง
       const { data, error } = await query;
       if (data && !error) {
         setShuntOrders(data.filter((o) => {
@@ -165,7 +199,6 @@ function App() {
     if (currentView === 'driver') fetchDriverJob();
     if (currentView === 'yard') fetchYardOrders();
     if (currentView === 'shunt') fetchShuntOrders();
-    
     const timer = setInterval(() => {
       if (currentView === 'admin') { fetchAllJobs(); fetchDailyPlans(); fetchMasterDocksList(); }
       if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs();
@@ -178,12 +211,9 @@ function App() {
 
   const handleExportCSV = () => {
     if (allJobs.length === 0) { alert('ไม่มีข้อมูลให้ Export ครับ'); return; }
-    
     const baseHeaders = ['วันที่ Check In', 'เลขคิวงาน', 'ทะเบียนรถ', 'ประเภทรถ', 'บริษัทขนส่ง', 'Vendor Code', 'Vendor Name', 'สถานะล่าสุด'];
     let dockHeaders = [];
-    for (let i = 1; i <= 5; i++) {
-      dockHeaders.push(`คลังที่ ${i}`, `ช่องจอด ${i}`, `Call Up ${i}`, `On Dock ${i}`, `Start Load ${i}`, `End Load ${i}`, `ถอยออก ${i}`);
-    }
+    for (let i = 1; i <= 5; i++) { dockHeaders.push(`คลังที่ ${i}`, `ช่องจอด ${i}`, `Call Up ${i}`, `On Dock ${i}`, `Start Load ${i}`, `End Load ${i}`, `ถอยออก ${i}`); }
     const headers = [...baseHeaders, ...dockHeaders];
 
     const formatTime = (isoString: string | null) => isoString ? new Date(isoString).toLocaleTimeString('th-TH') : '-';
@@ -198,23 +228,12 @@ function App() {
 
     const csvData = Object.keys(groupedJobs).map(planId => {
       const jobs = groupedJobs[planId].sort((a: any, b: any) => new Date(a.check_in_time).getTime() - new Date(b.check_in_time).getTime());
-      const firstJob = jobs[0];
-      const lastJob = jobs[jobs.length - 1];
-      const plan = firstJob.daily_plan;
-
-      let row = [
-        `"${formatDate(firstJob.check_in_time)}"`, `"${displayQueue(firstJob.queue_number)}"`, `"${getDisplayPlate(plan)}"`,
-        `"${plan?.transport_type || '-'}"`, `"${plan?.transport_company || '-'}"`, `"${plan?.vendor_code || '-'}"`,
-        `"${plan?.vendor_name || '-'}"`, `"${lastJob.status}"`
-      ];
-
+      const firstJob = jobs[0]; const lastJob = jobs[jobs.length - 1]; const plan = firstJob.daily_plan;
+      let row = [ `"${formatDate(firstJob.check_in_time)}"`, `"${displayQueue(firstJob.queue_number)}"`, `"${getDisplayPlate(plan)}"`, `"${plan?.transport_type || '-'}"`, `"${plan?.transport_company || '-'}"`, `"${plan?.vendor_code || '-'}"`, `"${plan?.vendor_name || '-'}"`, `"${lastJob.status}"` ];
       for (let i = 0; i < 5; i++) {
         if (jobs[i]) {
-          const j = jobs[i];
-          row.push(`"${getDCFromQueue(j.queue_number)}"`, `"${j.dock_number || '-'}"`, `"${formatTime(j.call_time)}"`, `"${formatTime(j.on_dock_time)}"`, `"${formatTime(j.start_load_time)}"`, `"${formatTime(j.end_load_time)}"`, `"${formatTime(j.finish_time)}"`);
-        } else {
-          row.push('""', '""', '""', '""', '""', '""', '""');
-        }
+          const j = jobs[i]; row.push(`"${getDCFromQueue(j.queue_number)}"`, `"${j.dock_number || '-'}"`, `"${formatTime(j.call_time)}"`, `"${formatTime(j.on_dock_time)}"`, `"${formatTime(j.start_load_time)}"`, `"${formatTime(j.end_load_time)}"`, `"${formatTime(j.finish_time)}"`);
+        } else { row.push('""', '""', '""', '""', '""', '""', '""'); }
       }
       return row.join(',');
     });
@@ -361,11 +380,7 @@ function App() {
     const plate = getDisplayPlate(job.daily_plan);
     await supabase.from('master_docks').update({ status: 'Occupied', current_job_id: job.id, current_plate: plate, }).in('dock_no', selectedDocks);
     
-    // 💡 [แก้ไข] ดักชื่อบริษัทภาษาไทยตอน Assign Dock
-    const companyName = job.daily_plan?.transport_company || ''; 
-    let shuntCompanyId = null; 
-    const transportType = job.daily_plan?.transport_type || '';
-
+    const companyName = job.daily_plan?.transport_company || ''; let shuntCompanyId = null; const transportType = job.daily_plan?.transport_type || '';
     if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { 
       const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt') || JSON.stringify(c).includes('พรอรุณ')); 
       if (prt) shuntCompanyId = prt.id; 
@@ -386,10 +401,7 @@ function App() {
 
     if (choice === 'no') {
       setMultiDropConfig(null); await executeStatusUpdate(job.id, { status: 'End Load', end_load_time: now, });
-      
-      // 💡 [แก้ไข] ดักชื่อบริษัทภาษาไทยตอนสร้างงานลากตู้เปล่า
-      const companyName = job.daily_plan?.transport_company || ''; 
-      let shuntCompanyId = null;
+      const companyName = job.daily_plan?.transport_company || ''; let shuntCompanyId = null;
       if (companyName.includes('พรอรุณ') || companyName.includes('PRT')) { 
         const prt = companiesList.find((c) => JSON.stringify(c).toLowerCase().includes('prt') || JSON.stringify(c).includes('พรอรุณ')); 
         if (prt) shuntCompanyId = prt.id; 
@@ -405,13 +417,7 @@ function App() {
       setMultiDropConfig(null); let baseQueue = (job.queue_number || '').split(' (')[0]; let currentRoute = getDCRoute(job.queue_number);
       await executeStatusUpdate(job.id, { status: 'Finish', end_load_time: now, finish_time: now }); 
       await releaseDocks(job.id);
-
-      await supabase.from('backhaul_jobs').insert([{ 
-        daily_plan_id: job.daily_plan_id, 
-        queue_number: `${baseQueue} (${currentRoute} -> ${nextDC})`, 
-        status: 'Call Up',
-        check_in_time: now
-      }]);
+      await supabase.from('backhaul_jobs').insert([{ daily_plan_id: job.daily_plan_id, queue_number: `${baseQueue} (${currentRoute} -> ${nextDC})`, status: 'Call Up', check_in_time: now }]);
       fetchAllJobs();
     }
   };
@@ -448,8 +454,20 @@ function App() {
   const getCompanyName = (companyObj: any, defaultId: string) => companyObj?.name || companyObj?.code || (defaultId ? defaultId.substring(0, 8) + '...' : '-');
   const isMultiDrop = driverJobData?.queue_number?.includes('(');
   const currentTargetDC = getDCFromQueue(driverJobData?.queue_number);
-  const filteredPlans = dailyPlans.filter((p) => { if (!planSearchQuery) return true; const q = planSearchQuery.toLowerCase(); return ( p.license_plate?.toLowerCase().includes(q) || p.vendor_name?.toLowerCase().includes(q) || p.vendor_code?.toLowerCase().includes(q) || p.job_no?.toLowerCase().includes(q) || p.transport_summary_no?.toLowerCase().includes(q) ); });
-  const isPlanCheckedIn = (planId: string) => { return allJobs.some( (job) => job.daily_plan_id === planId && job.status !== 'Finish' ); };
+  const filteredPlans = dailyPlans.filter((p) => { 
+    if (!planSearchQuery) return true; 
+    const q = planSearchQuery.toLowerCase(); 
+    return ( 
+      p.license_plate?.toLowerCase().includes(q) || 
+      p.vendor_name?.toLowerCase().includes(q) || 
+      p.vendor_code?.toLowerCase().includes(q) || 
+      p.job_no?.toLowerCase().includes(q) || 
+      p.transport_company?.toLowerCase().includes(q) 
+    ); 
+  });
+  
+  // 💡 ตรวจสอบว่ารถคันนี้ได้ Check In เข้าระบบหรือยัง (เช็คจาก daily_plan_id ใน allJobs)
+  const isPlanCheckedIn = (planId: string) => { return allJobs.some( (job) => job.daily_plan_id === planId ); };
 
   const getExecDashboardKPIs = () => {
     const dailyPlansToday = dailyPlans.filter(p => true);
@@ -458,6 +476,8 @@ function App() {
     const totalCheckIn = uniquePlansCheckIn.size;
     const notArrived = Math.max(0, totalPlan - totalCheckIn);
     
+    const countDirect = dailyPlansToday.filter(p => p.subjobtype === 'BH01').length;
+
     let countWait = 0, countOnDock = 0, countUnload = 0, countFinished = 0;
     let sumWaitTime = 0, countWaitTime = 0;
     let sumLoadTime = 0, countLoadTime = 0;
@@ -483,11 +503,7 @@ function App() {
       }
     });
 
-    const latestJobs = Object.values(allJobs.reduce((acc: any, job: any) => {
-      acc[job.daily_plan_id] = job;
-      return acc;
-    }, {}));
-
+    const latestJobs = Object.values(allJobs.reduce((acc: any, job: any) => { acc[job.daily_plan_id] = job; return acc; }, {}));
     latestJobs.forEach((job: any) => {
       if (job.status === 'Call Up' || job.status === 'Assigned') countWait++;
       else if (job.status === 'On Dock') countOnDock++;
@@ -499,7 +515,7 @@ function App() {
     const toPercent = (count: number) => totalActiveStatuses > 0 ? ((count / totalActiveStatuses) * 100).toFixed(1) : '0.0';
 
     return {
-      totalPlan, totalCheckIn, notArrived,
+      totalPlan, totalCheckIn, notArrived, countDirect,
       countWait, pctWait: toPercent(countWait),
       countOnDock, pctOnDock: toPercent(countOnDock),
       countUnload, pctUnload: toPercent(countUnload),
@@ -574,14 +590,19 @@ function App() {
 
   const displayJobs = Object.values(allJobs.reduce((acc: any, job: any) => {
     const pId = job.daily_plan_id;
-    if (!acc[pId]) {
-      acc[pId] = { ...job, combined_docks: job.dock_number ? [job.dock_number] : [] };
-    } else {
-      const newDocks = job.dock_number ? [...acc[pId].combined_docks, job.dock_number] : acc[pId].combined_docks;
-      acc[pId] = { ...job, combined_docks: newDocks }; 
-    }
+    if (!acc[pId]) { acc[pId] = { ...job, combined_docks: job.dock_number ? [job.dock_number] : [] }; } 
+    else { const newDocks = job.dock_number ? [...acc[pId].combined_docks, job.dock_number] : acc[pId].combined_docks; acc[pId] = { ...job, combined_docks: newDocks }; }
     return acc;
   }, {}));
+
+  // 💡 [แก้ไข] เปลี่ยน Logic การนับยอดหน้า Plan ให้เป็นไปตาม Actual TMS
+  const totalPlansToday = dailyPlans.length; // นับจาก Plan ทั้งหมด (รวมคีย์มือด้วย)
+  const returnedPlansCount = dailyPlans.filter(p => isPlanCheckedIn(p.id)).length; // นับเฉพาะคันที่ Check In
+  const notReturnedPlansCount = totalPlansToday - returnedPlansCount; // หาคันที่ยังไม่มา
+  const directPlansCount = dailyPlans.filter(p => p.subjobtype === 'BH01').length;
+
+  const getWait = (dc: string) => execData.dcStats[dc].waitCount > 0 ? (execData.dcStats[dc].waitSum / execData.dcStats[dc].waitCount).toFixed(0) : '0';
+  const getLoad = (dc: string) => execData.dcStats[dc].loadCount > 0 ? (execData.dcStats[dc].loadSum / execData.dcStats[dc].loadCount).toFixed(0) : '0';
 
   return (
     <div className="container">
@@ -597,32 +618,36 @@ function App() {
             <button onClick={() => setAdminTab('plan')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'plan' ? '#1976d2' : '#f1f5f9', color: adminTab === 'plan' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📑 แผนงาน (Daily Plan) </button>
             <button onClick={() => setAdminTab('dashboard')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'dashboard' ? '#1976d2' : '#f1f5f9', color: adminTab === 'dashboard' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 🚛 รายการรถ Backhaul </button>
             <button onClick={() => setAdminTab('utilization')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'utilization' ? '#10b981' : '#f1f5f9', color: adminTab === 'utilization' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📊 Dock Utilization </button>
-            <button onClick={() => setAdminTab('exec')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'exec' ? '#f59e0b' : '#f1f5f9', color: adminTab === 'exec' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📈 Executive Dashboard </button>
+            <button onClick={() => setAdminTab('exec')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'exec' ? '#f59e0b' : '#f1f5f9', color: adminTab === 'exec' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📈 Dashboard </button>
           </div>
 
           {adminTab === 'exec' && (
             <div className="dashboard-card" style={{ background: '#f8fafc', border: 'none' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                 <h3 style={{ margin: 0, color: '#334155' }}>📊 Executive Dashboard (ข้อมูลวันที่ {new Date(filterDate).toLocaleDateString('th-TH')})</h3>
+                 <h3 style={{ margin: 0, color: '#334155' }}>📊 Dashboard (ข้อมูลวันที่ {new Date(filterDate).toLocaleDateString('th-TH')})</h3>
                  <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px', }} />
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '15px', marginBottom: '20px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '20px' }}>
                 <div style={{ background: 'white', padding: '20px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderLeft: '5px solid #1976d2' }}>
-                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>แผนงานวันนี้ (Plan)</div>
+                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>Plan</div>
                   <div style={{ fontSize: '32px', fontWeight: '900', color: '#1e293b' }}>{execData.totalPlan} <span style={{ fontSize:'14px', color:'#64748b'}}>คัน</span></div>
                 </div>
                 <div style={{ background: 'white', padding: '20px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderLeft: '5px solid #10b981' }}>
-                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>กลับ Check-In แล้ว</div>
+                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>Check-In</div>
                   <div style={{ fontSize: '32px', fontWeight: '900', color: '#1e293b' }}>{execData.totalCheckIn} <span style={{ fontSize:'14px', color:'#64748b'}}>คัน</span></div>
                 </div>
                 <div style={{ background: 'white', padding: '20px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderLeft: '5px solid #ef4444' }}>
-                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>ยังไม่กลับเข้ามา</div>
+                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>Not Return</div>
                   <div style={{ fontSize: '32px', fontWeight: '900', color: '#1e293b' }}>{execData.notArrived} <span style={{ fontSize:'14px', color:'#64748b'}}>คัน</span></div>
+                </div>
+                <div style={{ background: 'white', padding: '20px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderLeft: '5px solid #8b5cf6' }}>
+                  <div style={{ color: '#64748b', fontSize: '14px', fontWeight: 'bold' }}>Direct</div>
+                  <div style={{ fontSize: '32px', fontWeight: '900', color: '#1e293b' }}>{execData.countDirect} <span style={{ fontSize:'14px', color:'#64748b'}}>คัน</span></div>
                 </div>
               </div>
 
-              <h4 style={{ color: '#334155', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>📍 สถานะรถในลานปัจจุบัน (คิดจากยอดที่ Check-In)</h4>
+              <h4 style={{ color: '#334155', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>📍 สถานะรถในคลัง</h4>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '15px', marginBottom: '20px' }}>
                 <div style={{ background: '#f1f5f9', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
                   <div style={{ color: '#64748b', fontWeight: 'bold' }}>รอลงสินค้า (Wait)</div>
@@ -646,48 +671,86 @@ function App() {
                 </div>
               </div>
 
-              <h4 style={{ color: '#334155', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>⏱️ ประสิทธิภาพเวลา (เฉลี่ย)</h4>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '15px' }}>
-                <div style={{ background: 'white', padding: '15px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-                   <div style={{ fontWeight: 'bold', color: '#334155', marginBottom: '10px' }}>ภาพรวมทั้งหมด</div>
-                   <div>รอลงสินค้าเฉลี่ย: <strong style={{color:'#f59e0b'}}>{execData.avgWaitOverall} นาที/รอบ</strong></div>
-                   <div>เวลาลงสินค้าเฉลี่ย: <strong style={{color:'#10b981'}}>{execData.avgLoadOverall} นาที/รอบ</strong></div>
-                </div>
-                {MASTER_DCS.map(dc => {
-                  const stats = execData.dcStats[dc];
-                  const wait = stats.waitCount > 0 ? (stats.waitSum / stats.waitCount).toFixed(0) : '0';
-                  const load = stats.loadCount > 0 ? (stats.loadSum / stats.loadCount).toFixed(0) : '0';
-                  return (
-                    <div key={dc} style={{ background: 'white', padding: '15px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-                      <div style={{ fontWeight: 'bold', color: '#334155', marginBottom: '10px' }}>แยกตามคลัง {dc}</div>
-                      <div>รอลงสินค้าเฉลี่ย: <strong style={{color:'#f59e0b'}}>{wait} นาที/รอบ</strong></div>
-                      <div>เวลาลงสินค้าเฉลี่ย: <strong style={{color:'#10b981'}}>{load} นาที/รอบ</strong></div>
-                    </div>
-                  )
-                })}
+              <h4 style={{ color: '#334155', borderBottom: '1px solid #ccc', paddingBottom: '10px' }}>⏱️ AVG.Performance</h4>
+              <div className="table-responsive" style={{ borderRadius: '8px', overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
+                <table className="dashboard-table" style={{ background: 'white', margin: 0 }}>
+                  <thead> 
+                    <tr> 
+                      <th style={{ backgroundColor: '#f8fafc', color: '#334155', fontSize: '15px' }}>Average/Truck</th> 
+                      <th style={{ backgroundColor: '#f8fafc', color: '#334155', textAlign: 'center', fontSize: '15px' }}>Overall</th> 
+                      <th style={{ backgroundColor: '#f8fafc', color: '#334155', textAlign: 'center', fontSize: '15px' }}>DC2</th> 
+                      <th style={{ backgroundColor: '#f8fafc', color: '#334155', textAlign: 'center', fontSize: '15px' }}>DC6</th> 
+                      <th style={{ backgroundColor: '#f8fafc', color: '#334155', textAlign: 'center', fontSize: '15px' }}>DC7.2</th> 
+                    </tr> 
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td style={{ fontWeight: 'bold', color: '#475569', fontSize: '15px' }}>Wait Unload</td>
+                      <td style={{ textAlign: 'center', color: '#f59e0b', fontWeight: 'bold', fontSize: '16px' }}>{execData.avgWaitOverall} นาที</td>
+                      <td style={{ textAlign: 'center', color: '#f59e0b', fontWeight: 'bold', fontSize: '16px' }}>{getWait('DC2')} นาที</td>
+                      <td style={{ textAlign: 'center', color: '#f59e0b', fontWeight: 'bold', fontSize: '16px' }}>{getWait('DC6')} นาที</td>
+                      <td style={{ textAlign: 'center', color: '#f59e0b', fontWeight: 'bold', fontSize: '16px' }}>{getWait('DC7.2')} นาที</td>
+                    </tr>
+                    <tr>
+                      <td style={{ fontWeight: 'bold', color: '#475569', fontSize: '15px' }}>Unload</td>
+                      <td style={{ textAlign: 'center', color: '#10b981', fontWeight: 'bold', fontSize: '16px' }}>{execData.avgLoadOverall} นาที</td>
+                      <td style={{ textAlign: 'center', color: '#10b981', fontWeight: 'bold', fontSize: '16px' }}>{getLoad('DC2')} นาที</td>
+                      <td style={{ textAlign: 'center', color: '#10b981', fontWeight: 'bold', fontSize: '16px' }}>{getLoad('DC6')} นาที</td>
+                      <td style={{ textAlign: 'center', color: '#10b981', fontWeight: 'bold', fontSize: '16px' }}>{getLoad('DC7.2')} นาที</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
 
           {adminTab === 'plan' && (
             <div className="dashboard-card">
+              
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '15px', marginBottom: '20px' }}>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #1976d2', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  {/* 💡 [แก้ไข] เปลี่ยนชื่อ Card ตามบรีฟ */}
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Actual Truck</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#1e293b' }}>{totalPlansToday} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #10b981', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Returned</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#10b981' }}>{returnedPlansCount} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #ef4444', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Not Return</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ef4444' }}>{notReturnedPlansCount} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #8b5cf6', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Direct</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#8b5cf6' }}>{directPlansCount} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+              </div>
+
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px', flexWrap: 'wrap', gap: '10px', }}>
-                <input type="text" placeholder="🔍 ค้นหา Doc.No,BH Job,VD.Code,VD.Name,ทะเบียนรถ" value={planSearchQuery} onChange={(e) => setPlanSearchQuery(e.target.value)} style={{ padding: '10px', width: '100%', maxWidth: '450px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px', }} autoFocus />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '10px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px', background: '#fff' }} />
+                  <input type="text" placeholder="🔍 ค้นหา Job, VD.Code, ทะเบียนรถ, บริษัทขนส่ง" value={planSearchQuery} onChange={(e) => setPlanSearchQuery(e.target.value)} style={{ padding: '10px', width: '100%', minWidth: '300px', maxWidth: '450px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px', }} />
+                </div>
+                
                 <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                   <input type="file" accept=".csv" ref={fileInputRef} onChange={handleImportCSV} style={{ display: 'none' }} />
                   <button onClick={() => fileInputRef.current?.click()} className="btn-action call-up" style={{ padding: '10px 20px', fontSize: '16px', background: '#475569', color: 'white', border: 'none', }} disabled={loading} > {loading ? '⏳ กำลังนำเข้า...' : '📥 นำเข้าไฟล์ CSV'} </button>
-                  <button onClick={() => { setPlanForm(initialPlanForm); setShowPlanForm(true); }} className="btn-action on-dock" style={{ padding: '10px 20px', fontSize: '16px' }} > ➕ เพิ่มรายการรถ </button>
+                  <button onClick={() => { setPlanForm({...initialPlanForm, schedule_date: filterDate}); setShowPlanForm(true); }} className="btn-action on-dock" style={{ padding: '10px 20px', fontSize: '16px' }} > ➕ เพิ่มรายการรถ </button>
                 </div>
               </div>
               <div className="table-responsive">
                 <table className="dashboard-table">
-                  <thead> <tr> <th>Transport No</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>ประเภท</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
+                  <thead> <tr> <th>บริษัทขนส่ง</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>ประเภท</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
-                    {filteredPlans.length === 0 ? ( <tr> <td colSpan={7} style={{ textAlign: 'center', padding: '20px' }} > ไม่พบข้อมูลแผนงาน </td> </tr> ) : (
+                    {filteredPlans.length === 0 ? ( <tr> <td colSpan={7} style={{ textAlign: 'center', padding: '20px' }} > ไม่พบข้อมูลแผนงานของวันที่ {new Date(filterDate).toLocaleDateString('th-TH')} </td> </tr> ) : (
                       filteredPlans.map((plan) => (
                         <tr key={plan.id}>
-                          <td style={{ color: '#1976d2', fontWeight: 'bold' }}> {plan.transport_summary_no || '-'} </td>
-                          <td>{plan.job_no || '-'}</td>
+                          <td style={{ color: '#555', fontWeight: 'bold' }}> {plan.transport_company || '-'} </td>
+                          <td>
+                            {plan.job_no || '-'}
+                            {plan.subjobtype === 'BH01' && <span style={{display: 'inline-block', marginLeft: '8px', background: '#e0e7ff', color: '#4338ca', fontSize: '11px', padding: '2px 6px', borderRadius: '4px'}}>Direct</span>}
+                          </td>
                           <td className="vendor-cell"> {plan.vendor_code && ( <span style={{ color: '#64748b', fontSize: '13px', display: 'block', fontWeight: 'normal', }} > [{plan.vendor_code}] </span> )} {plan.vendor_name || '-'} </td>
                           <td style={{ fontWeight: 'bold' }}> {getDisplayPlate(plan)} </td>
                           <td>{plan.transport_type || '-'}</td>
@@ -713,7 +776,7 @@ function App() {
           {adminTab === 'dashboard' && (
             <div className="dashboard-card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', flexWrap: 'wrap', gap: '10px', }}>
-                <h3 style={{ margin: 0 }}>📊 รายการรถ Backhaul</h3>
+                <h3 style={{ margin: 0 }}>📊 BH Truck Backhaul</h3>
                 <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                   <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px', }} />
                   <button onClick={handleExportCSV} style={{ background: '#10b981', color: 'white', border: 'none', padding: '10px 15px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)', }} > 📥 ดาวน์โหลดไฟล์ CSV </button>
@@ -746,7 +809,7 @@ function App() {
           {adminTab === 'utilization' && (
             <div className="dashboard-card" style={{ background: '#f8fafc', border: 'none' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
-                <h3 style={{ margin: 0, color: '#334155' }}> 📈 Dock Utilization (Real-time Performance) </h3>
+                <h3 style={{ margin: 0, color: '#334155' }}> 📈 BH Dock Status</h3>
                 <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                   <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px', }} />
                   <button onClick={handleExportDockCSV} style={{ background: '#f59e0b', color: 'white', border: 'none', padding: '10px 15px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)', }} > 📊 โหลดรายงาน Dock (CSV) </button>
@@ -759,19 +822,19 @@ function App() {
                   const pctIn = data.totalIn > 0 ? ((data.occIn / data.totalIn) * 100).toFixed(0) : '0';
                   return (
                     <div key={dc} style={{ background: 'white', padding: '20px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderTop: '5px solid #10b981' }}>
-                       <h4 style={{ margin: '0 0 10px 0', color: '#334155'}}>คลัง {dc}</h4>
+                       <h4 style={{ margin: '0 0 10px 0', color: '#334155'}}>{dc}</h4>
                        <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #eee', paddingBottom: '10px', marginBottom: '10px'}}>
-                          <span style={{color: '#64748b'}}>Inbound Usage:</span>
-                          <strong style={{color: '#ef4444'}}>{data.occIn}/{data.totalIn} บาน ({pctIn}%)</strong>
+                          <span style={{color: '#64748b'}}>Usage:</span>
+                          <strong style={{color: '#ef4444'}}>{data.occIn}/{data.totalIn} Dock ({pctIn}%)</strong>
                        </div>
                        <div style={{ fontSize: '12px', color: '#94a3b8' }}></div>
                     </div>
                   );
                 })}
               </div>
- 
+
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderBottom: '2px solid #e2e8f0', paddingBottom: '10px', marginBottom: '20px', }}>
-                <h3 style={{ margin: 0, color: '#334155' }}> 🏢 Live Dock Heatmap (เฉพาะฝั่ง Inbound) </h3>
+                <h3 style={{ margin: 0, color: '#334155' }}> 🏢 Live Dock Heatmap</h3>
                 <div style={{ display: 'flex', gap: '15px', fontSize: '14px', fontWeight: 'bold', color: '#475569', }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }}> <div style={{ width: '16px', height: '16px', background: '#22c55e', borderRadius: '4px', }} ></div> ว่างพร้อมใช้งาน </span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }} > <div style={{ width: '16px', height: '16px', background: '#ef4444', borderRadius: '4px', }} ></div> กำลังลงสินค้า </span>
@@ -792,12 +855,14 @@ function App() {
             <h3 style={{ borderBottom: '2px solid #eee', paddingBottom: '10px' }} > {planForm.id ? '✏️ แก้ไขรายการรถ' : '➕ เพิ่มรายการรถ'} </h3>
             <form onSubmit={handleSavePlan}>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '15px', marginTop: '15px', }} >
-                <div className="form-group"> <label>Transport Summary No *</label> <input required value={planForm.transport_summary_no} onChange={(e) => setPlanForm({ ...planForm, transport_summary_no: e.target.value, }) } /> </div>
+                <div className="form-group"> <label>วันที่แผน (Schedule Date)</label> <input type="date" required value={planForm.schedule_date} onChange={(e) => setPlanForm({ ...planForm, schedule_date: e.target.value, }) } /> </div>
+                <div className="form-group"> <label>Transport Summary No</label> <input value={planForm.transport_summary_no} onChange={(e) => setPlanForm({ ...planForm, transport_summary_no: e.target.value, }) } /> </div>
                 <div className="form-group"> <label>Job No *</label> <input required value={planForm.job_no} onChange={(e) => setPlanForm({ ...planForm, job_no: e.target.value }) } /> </div>
+                <div className="form-group"> <label>Subjobtype (เช่น BH01)</label> <input value={planForm.subjobtype} onChange={(e) => setPlanForm({ ...planForm, subjobtype: e.target.value }) } /> </div>
                 <div className="form-group"> <label>Vendor Code</label> <input value={planForm.vendor_code} onChange={(e) => setPlanForm({ ...planForm, vendor_code: e.target.value }) } /> </div>
                 <div className="form-group"> <label>Vendor Name *</label> <input required value={planForm.vendor_name} onChange={(e) => setPlanForm({ ...planForm, vendor_name: e.target.value }) } /> </div>
                 <div className="form-group"> <label>Transport Type *</label> <input required placeholder="เช่น T10W, T18W" value={planForm.transport_type} onChange={(e) => setPlanForm({ ...planForm, transport_type: e.target.value, }) } /> </div>
-                <div className="form-group"> <label>ทะเบียนรถ (License Plate) *</label> <input required value={planForm.license_plate} onChange={(e) => setPlanForm({ ...planForm, license_plate: e.target.value, }) } /> </div>
+                <div className="form-group"> <label>ทะเบียนรถ (License Plate)</label> <input value={planForm.license_plate} onChange={(e) => setPlanForm({ ...planForm, license_plate: e.target.value, }) } /> </div>
                 <div className="form-group"> <label>ทะเบียนหาง (Trailer Plate)</label> <input placeholder="ถ้ามี..." value={planForm.trailer_plate} onChange={(e) => setPlanForm({ ...planForm, trailer_plate: e.target.value, }) } /> </div>
                 <div className="form-group"> <label>ชื่อคนขับ (Driver Name)</label> <input value={planForm.driver_name} onChange={(e) => setPlanForm({ ...planForm, driver_name: e.target.value }) } /> </div>
                 <div className="form-group"> <label>บริษัทขนส่ง (Transport Company) *</label> <input required value={planForm.transport_company} onChange={(e) => setPlanForm({ ...planForm, transport_company: e.target.value, }) } /> </div>
