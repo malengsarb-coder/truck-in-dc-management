@@ -25,6 +25,9 @@ function App() {
   const [shuntOrders, setShuntOrders] = useState<any[]>([]);
   
   const [filterDate, setFilterDate] = useState(() => new Date().toISOString().split('T')[0]);
+  
+  // 💡 State สำหรับเก็บสถานะล่าสุดเพื่อเล่นเสียงเตือน (ไม่ให้เสียงเล่นซ้ำ)
+  const [lastAlertStatus, setLastAlertStatus] = useState('');
 
   const [dockModal, setDockModal] = useState<{ isOpen: boolean; job: any; docks: any[]; selectedDocks: string[]; requiredCount: number } | null>(null);
 
@@ -38,6 +41,40 @@ function App() {
   const [showPlanForm, setShowPlanForm] = useState(false);
   const [planForm, setPlanForm] = useState(initialPlanForm);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 💡 ฟังก์ชันสร้างเสียงเตือนสำหรับ พขร. โดยเฉพาะ
+  const playAlertSound = (type: string) => {
+    try {
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      
+      const playBeep = (freq: number, oscType: any, timeOffset: number, dur: number) => {
+        const osc = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        osc.type = oscType;
+        osc.frequency.value = freq;
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        osc.start(audioCtx.currentTime + timeOffset);
+        gainNode.gain.setValueAtTime(1, audioCtx.currentTime + timeOffset);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + timeOffset + dur);
+        osc.stop(audioCtx.currentTime + timeOffset + dur);
+      };
+
+      if (type === 'assign') {
+        // เสียง ติ๊ง-ต่อง (ได้คิวเข้าจอด)
+        playBeep(880, 'sine', 0, 0.5);
+        playBeep(1046.50, 'sine', 0.2, 0.8);
+      } else if (type === 'endload') {
+        // เสียง ติ๊ด-ติ๊ด-ติ๊ด (ลงสินค้าเสร็จ ถอยออกได้)
+        playBeep(600, 'triangle', 0, 0.3);
+        playBeep(600, 'triangle', 0.4, 0.3);
+        playBeep(600, 'triangle', 0.8, 0.3);
+      }
+    } catch(e) {
+      console.log('Audio not supported or disabled by browser', e);
+    }
+  };
 
   const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -159,7 +196,12 @@ function App() {
   const fetchDriverJob = async () => {
     if (!driverJobData) return;
     const { data } = await supabase.from('backhaul_jobs').select(`*, daily_plan(*)`).eq('daily_plan_id', driverJobData.daily_plan_id).neq('status', 'Finish').order('check_in_time', { ascending: false }).limit(1).single();
-    if (data) { setDriverJobData(data); } else { alert('🏁 งานของคุณเสร็จสิ้นครบทุกคลังเรียบร้อยแล้ว!'); handleLogout(); }
+    if (data) { 
+      setDriverJobData(data); 
+    } else { 
+      alert('🏁 งานของคุณเสร็จสิ้นครบทุกคลังเรียบร้อยแล้ว!'); 
+      handleLogout(); 
+    }
   };
 
   const fetchYardOrders = async () => {
@@ -208,6 +250,21 @@ function App() {
     }, 3000);
     return () => clearInterval(timer);
   }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
+
+  // 💡 ตรวจจับสถานะการเปลี่ยนแปลงของ พขร. เพื่อเล่นเสียงเตือน
+  useEffect(() => {
+    if (currentView === 'driver' && driverJobData) {
+      const currentStat = driverJobData.status;
+      if (currentStat !== lastAlertStatus) {
+        if (currentStat === 'Assigned') {
+          playAlertSound('assign');
+        } else if (currentStat === 'End Load') {
+          playAlertSound('endload');
+        }
+        setLastAlertStatus(currentStat);
+      }
+    }
+  }, [currentView, driverJobData, lastAlertStatus]);
 
   const handleExportCSV = () => {
     if (allJobs.length === 0) { alert('ไม่มีข้อมูลให้ Export ครับ'); return; }
@@ -284,7 +341,7 @@ function App() {
     }
   };
 
-  const handleLogout = () => { setCurrentView('login'); setReceiverDC(''); setDriverJobData(null); setShuntCompany(''); setCheckInModal(null); setPlanSearchQuery(''); };
+  const handleLogout = () => { setCurrentView('login'); setReceiverDC(''); setDriverJobData(null); setShuntCompany(''); setCheckInModal(null); setPlanSearchQuery(''); setLastAlertStatus(''); };
 
   const handleCreateYardOrder = async (e: React.FormEvent) => {
     e.preventDefault(); if (!yardCompanyId || !yardContainerNo || !yardOrigin || !yardDestination) { alert('กรุณาระบุข้อมูลให้ครบถ้วน'); return; }
@@ -331,8 +388,20 @@ function App() {
     setLoading(true); const planData = checkInModal.plan; const selectedDC = checkInModal.selectedDC;
     try {
       const isT18W = planData.transport_type === 'T18W'; const isSpecialCompany = planData.transport_company?.includes('พรอรุณ') || planData.transport_company?.includes('คาร์โก้');
-      let queueNo = ''; const today = new Date(); const dd = String(today.getDate()).padStart(2, '0'); const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const dcNum = selectedDC === 'DC7.2' ? '7' : selectedDC.replace('DC', ''); const prefix = `${dcNum}-${dd}${mm}-`;
+      let queueNo = ''; 
+      
+      // 💡 Logic: เปลี่ยนเวลาตัดคิวเป็น 07:00 น.
+      const now = new Date(); 
+      let queueDate = new Date(now);
+      if (now.getHours() < 7) {
+        queueDate.setDate(queueDate.getDate() - 1); // ถ้าย้อนหลัง 7 โมงเช้า ให้ใช้ Prefix วันที่ของเมื่อวาน
+      }
+      const dd = String(queueDate.getDate()).padStart(2, '0'); 
+      const mm = String(queueDate.getMonth() + 1).padStart(2, '0');
+      
+      const dcNum = selectedDC === 'DC7.2' ? '7' : selectedDC.replace('DC', ''); 
+      const prefix = `${dcNum}-${dd}${mm}-`;
+      
       if (!(isT18W && isSpecialCompany)) {
         const { count, error: countError } = await supabase.from('backhaul_jobs').select('*', { count: 'exact', head: true }).like('queue_number', `${prefix}%`);
         if (countError) throw countError; queueNo = `${prefix}${String((count || 0) + 1).padStart(3, '0')}`;
@@ -435,7 +504,22 @@ function App() {
   };
 
   const renderActionButton = (job: any) => {
-    if (job.status === 'Finish') return (<span style={{ color: '#2e7d32', fontWeight: 'bold' }}>✅ เสร็จสิ้น</span>);
+    if (job.status === 'Finish') {
+      // 💡 คำนวณเวลาลงสินค้า (On Dock -> End Load / Finish)
+      let durationText = '';
+      if (job.on_dock_time && (job.end_load_time || job.finish_time)) {
+          const endTime = job.end_load_time || job.finish_time;
+          const diffMins = Math.max(0, Math.round((new Date(endTime).getTime() - new Date(job.on_dock_time).getTime()) / 60000));
+          durationText = `⏱️ ใช้เวลา ${diffMins} นาที`;
+      }
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <span style={{ color: '#2e7d32', fontWeight: 'bold' }}>✅ เสร็จสิ้น</span>
+          {durationText && <span style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>{durationText}</span>}
+        </div>
+      );
+    }
+    
     let btnText = ''; let btnClass = ''; const activeStatus = job.status === 'Waiting Unload' ? 'Call Up' : job.status;
     switch (activeStatus) { case 'Call Up': btnText = '📢 Assign Dock'; btnClass = 'call-up'; break; case 'Assigned': btnText = '🚚 รถเข้า Dock'; btnClass = 'assigned'; break; case 'On Dock': btnText = '📦 เริ่มลงสินค้า'; btnClass = 'on-dock'; break; case 'Unloading': btnText = '✅ ลงสินค้าจบ'; btnClass = 'unloading'; break; case 'End Load': btnText = '🔙 รถถอยออกจาก Dock'; btnClass = 'end-load'; break; case 'Off Dock': btnText = '🏁 จบงาน Check Out'; btnClass = 'off-dock'; break; default: return <span>-</span>; }
     return (
@@ -462,11 +546,10 @@ function App() {
       p.vendor_name?.toLowerCase().includes(q) || 
       p.vendor_code?.toLowerCase().includes(q) || 
       p.job_no?.toLowerCase().includes(q) || 
-      p.transport_company?.toLowerCase().includes(q) 
+      p.transport_company?.toLowerCase().includes(q) ||
+      p.driver_name?.toLowerCase().includes(q) // ค้นหาด้วยชื่อคนขับได้ด้วย
     ); 
   });
-  
-  // 💡 ตรวจสอบว่ารถคันนี้ได้ Check In เข้าระบบหรือยัง (เช็คจาก daily_plan_id ใน allJobs)
   const isPlanCheckedIn = (planId: string) => { return allJobs.some( (job) => job.daily_plan_id === planId ); };
 
   const getExecDashboardKPIs = () => {
@@ -595,10 +678,9 @@ function App() {
     return acc;
   }, {}));
 
-  // 💡 [แก้ไข] เปลี่ยน Logic การนับยอดหน้า Plan ให้เป็นไปตาม Actual TMS
-  const totalPlansToday = dailyPlans.length; // นับจาก Plan ทั้งหมด (รวมคีย์มือด้วย)
-  const returnedPlansCount = dailyPlans.filter(p => isPlanCheckedIn(p.id)).length; // นับเฉพาะคันที่ Check In
-  const notReturnedPlansCount = totalPlansToday - returnedPlansCount; // หาคันที่ยังไม่มา
+  const totalPlansToday = dailyPlans.length;
+  const returnedPlansCount = dailyPlans.filter(p => isPlanCheckedIn(p.id)).length;
+  const notReturnedPlansCount = totalPlansToday - returnedPlansCount;
   const directPlansCount = dailyPlans.filter(p => p.subjobtype === 'BH01').length;
 
   const getWait = (dc: string) => execData.dcStats[dc].waitCount > 0 ? (execData.dcStats[dc].waitSum / execData.dcStats[dc].waitCount).toFixed(0) : '0';
@@ -709,7 +791,6 @@ function App() {
               
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '15px', marginBottom: '20px' }}>
                 <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #1976d2', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
-                  {/* 💡 [แก้ไข] เปลี่ยนชื่อ Card ตามบรีฟ */}
                   <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Actual Truck</div>
                   <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#1e293b' }}>{totalPlansToday} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
                 </div>
@@ -741,9 +822,10 @@ function App() {
               </div>
               <div className="table-responsive">
                 <table className="dashboard-table">
-                  <thead> <tr> <th>บริษัทขนส่ง</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>ประเภท</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
+                  {/* 💡 เพิ่มคอลัมน์ "ชื่อ พขร." */}
+                  <thead> <tr> <th>บริษัทขนส่ง</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>ชื่อ พขร.</th> <th>ประเภท</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
-                    {filteredPlans.length === 0 ? ( <tr> <td colSpan={7} style={{ textAlign: 'center', padding: '20px' }} > ไม่พบข้อมูลแผนงานของวันที่ {new Date(filterDate).toLocaleDateString('th-TH')} </td> </tr> ) : (
+                    {filteredPlans.length === 0 ? ( <tr> <td colSpan={8} style={{ textAlign: 'center', padding: '20px' }} > ไม่พบข้อมูลแผนงานของวันที่ {new Date(filterDate).toLocaleDateString('th-TH')} </td> </tr> ) : (
                       filteredPlans.map((plan) => (
                         <tr key={plan.id}>
                           <td style={{ color: '#555', fontWeight: 'bold' }}> {plan.transport_company || '-'} </td>
@@ -753,6 +835,10 @@ function App() {
                           </td>
                           <td className="vendor-cell"> {plan.vendor_code && ( <span style={{ color: '#64748b', fontSize: '13px', display: 'block', fontWeight: 'normal', }} > [{plan.vendor_code}] </span> )} {plan.vendor_name || '-'} </td>
                           <td style={{ fontWeight: 'bold' }}> {getDisplayPlate(plan)} </td>
+                          
+                          {/* 💡 ดึงชื่อคนขับมาโชว์ */}
+                          <td style={{ color: '#0f172a' }}>{plan.driver_name || '-'}</td>
+                          
                           <td>{plan.transport_type || '-'}</td>
                           <td> {isPlanCheckedIn(plan.id) ? ( <span style={{ color: '#2e7d32', fontWeight: 'bold', background: '#e8f5e9', padding: '4px 8px', borderRadius: '4px', }} > ✅ Checked In </span> ) : ( <span style={{ color: '#ed6c02', fontWeight: 'bold' }} > ⏳ Pending </span> )} </td>
                           <td style={{ textAlign: 'center', width: '250px' }}>
