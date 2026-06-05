@@ -25,8 +25,6 @@ function App() {
   const [shuntOrders, setShuntOrders] = useState<any[]>([]);
   
   const [filterDate, setFilterDate] = useState(() => new Date().toISOString().split('T')[0]);
-  
-  // 💡 State สำหรับเก็บสถานะล่าสุดเพื่อเล่นเสียงเตือน (ไม่ให้เสียงเล่นซ้ำ)
   const [lastAlertStatus, setLastAlertStatus] = useState('');
 
   const [dockModal, setDockModal] = useState<{ isOpen: boolean; job: any; docks: any[]; selectedDocks: string[]; requiredCount: number } | null>(null);
@@ -42,7 +40,6 @@ function App() {
   const [planForm, setPlanForm] = useState(initialPlanForm);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 💡 ฟังก์ชันสร้างเสียงเตือนสำหรับ พขร. โดยเฉพาะ
   const playAlertSound = (type: string) => {
     try {
       const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -62,11 +59,9 @@ function App() {
       };
 
       if (type === 'assign') {
-        // เสียง ติ๊ง-ต่อง (ได้คิวเข้าจอด)
         playBeep(880, 'sine', 0, 0.5);
         playBeep(1046.50, 'sine', 0.2, 0.8);
       } else if (type === 'endload') {
-        // เสียง ติ๊ด-ติ๊ด-ติ๊ด (ลงสินค้าเสร็จ ถอยออกได้)
         playBeep(600, 'triangle', 0, 0.3);
         playBeep(600, 'triangle', 0.4, 0.3);
         playBeep(600, 'triangle', 0.8, 0.3);
@@ -169,9 +164,10 @@ function App() {
     const { data } = await query; if (data) setAllJobs(data);
   };
 
+  // 💡 อัปเกรด: ให้ดึงข้อมูลลูก (backhaul_jobs) มาด้วยเลย เพื่อเช็คสถานะ Check-In ได้แม่นยำ
   const fetchDailyPlans = async () => { 
     const { data } = await supabase.from('daily_plan')
-      .select('*')
+      .select('*, backhaul_jobs(id)')
       .eq('schedule_date', filterDate)
       .order('id', { ascending: false })
       .limit(500); 
@@ -251,7 +247,6 @@ function App() {
     return () => clearInterval(timer);
   }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
 
-  // 💡 ตรวจจับสถานะการเปลี่ยนแปลงของ พขร. เพื่อเล่นเสียงเตือน
   useEffect(() => {
     if (currentView === 'driver' && driverJobData) {
       const currentStat = driverJobData.status;
@@ -390,11 +385,10 @@ function App() {
       const isT18W = planData.transport_type === 'T18W'; const isSpecialCompany = planData.transport_company?.includes('พรอรุณ') || planData.transport_company?.includes('คาร์โก้');
       let queueNo = ''; 
       
-      // 💡 Logic: เปลี่ยนเวลาตัดคิวเป็น 07:00 น.
       const now = new Date(); 
       let queueDate = new Date(now);
       if (now.getHours() < 7) {
-        queueDate.setDate(queueDate.getDate() - 1); // ถ้าย้อนหลัง 7 โมงเช้า ให้ใช้ Prefix วันที่ของเมื่อวาน
+        queueDate.setDate(queueDate.getDate() - 1); 
       }
       const dd = String(queueDate.getDate()).padStart(2, '0'); 
       const mm = String(queueDate.getMonth() + 1).padStart(2, '0');
@@ -411,7 +405,11 @@ function App() {
       if (existing && existing.length > 0) { alert('⚠️ รถคันนี้ Check-in ไปแล้ว'); setCheckInModal(null); setLoading(false); return; }
 
       await supabase.from('backhaul_jobs').insert([{ daily_plan_id: planData.id, queue_number: queueNo, status: 'Call Up', check_in_time: new Date().toISOString() }]);
-      alert(`✅ เช็คอินสำเร็จ!`); setCheckInModal(null); setPlanSearchQuery(''); fetchAllJobs();
+      alert(`✅ เช็คอินสำเร็จ!`); 
+      setCheckInModal(null); 
+      setPlanSearchQuery(''); 
+      fetchAllJobs(); 
+      fetchDailyPlans(); // 💡 อัปเดตตาราง Plan ทันที ให้ปุ่มเปลี่ยนสถานะ
     } catch (error: any) { alert('❌ เกิดข้อผิดพลาดในการ Check In'); } finally { setLoading(false); }
   };
 
@@ -505,7 +503,6 @@ function App() {
 
   const renderActionButton = (job: any) => {
     if (job.status === 'Finish') {
-      // 💡 คำนวณเวลาลงสินค้า (On Dock -> End Load / Finish)
       let durationText = '';
       if (job.on_dock_time && (job.end_load_time || job.finish_time)) {
           const endTime = job.end_load_time || job.finish_time;
@@ -547,10 +544,14 @@ function App() {
       p.vendor_code?.toLowerCase().includes(q) || 
       p.job_no?.toLowerCase().includes(q) || 
       p.transport_company?.toLowerCase().includes(q) ||
-      p.driver_name?.toLowerCase().includes(q) // ค้นหาด้วยชื่อคนขับได้ด้วย
+      p.driver_name?.toLowerCase().includes(q)
     ); 
   });
-  const isPlanCheckedIn = (planId: string) => { return allJobs.some( (job) => job.daily_plan_id === planId ); };
+  
+  // 💡 ฟังก์ชันเช็คสถานะ Check-In ใหม่ที่แม่นยำ 100% (ดูจากความสัมพันธ์ของฐานข้อมูล)
+  const isPlanCheckedIn = (plan: any) => { 
+    return plan.backhaul_jobs && plan.backhaul_jobs.length > 0; 
+  };
 
   const getExecDashboardKPIs = () => {
     const dailyPlansToday = dailyPlans.filter(p => true);
@@ -679,7 +680,8 @@ function App() {
   }, {}));
 
   const totalPlansToday = dailyPlans.length;
-  const returnedPlansCount = dailyPlans.filter(p => isPlanCheckedIn(p.id)).length;
+  // 💡 การคำนวณจำนวนส่ง plan เข้าไปให้ตรวจสอบ
+  const returnedPlansCount = dailyPlans.filter(p => isPlanCheckedIn(p)).length;
   const notReturnedPlansCount = totalPlansToday - returnedPlansCount;
   const directPlansCount = dailyPlans.filter(p => p.subjobtype === 'BH01').length;
 
@@ -822,7 +824,6 @@ function App() {
               </div>
               <div className="table-responsive">
                 <table className="dashboard-table">
-                  {/* 💡 เพิ่มคอลัมน์ "ชื่อ พขร." */}
                   <thead> <tr> <th>บริษัทขนส่ง</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>ชื่อ พขร.</th> <th>ประเภท</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
                     {filteredPlans.length === 0 ? ( <tr> <td colSpan={8} style={{ textAlign: 'center', padding: '20px' }} > ไม่พบข้อมูลแผนงานของวันที่ {new Date(filterDate).toLocaleDateString('th-TH')} </td> </tr> ) : (
@@ -835,14 +836,12 @@ function App() {
                           </td>
                           <td className="vendor-cell"> {plan.vendor_code && ( <span style={{ color: '#64748b', fontSize: '13px', display: 'block', fontWeight: 'normal', }} > [{plan.vendor_code}] </span> )} {plan.vendor_name || '-'} </td>
                           <td style={{ fontWeight: 'bold' }}> {getDisplayPlate(plan)} </td>
-                          
-                          {/* 💡 ดึงชื่อคนขับมาโชว์ */}
                           <td style={{ color: '#0f172a' }}>{plan.driver_name || '-'}</td>
-                          
                           <td>{plan.transport_type || '-'}</td>
-                          <td> {isPlanCheckedIn(plan.id) ? ( <span style={{ color: '#2e7d32', fontWeight: 'bold', background: '#e8f5e9', padding: '4px 8px', borderRadius: '4px', }} > ✅ Checked In </span> ) : ( <span style={{ color: '#ed6c02', fontWeight: 'bold' }} > ⏳ Pending </span> )} </td>
+                          {/* 💡 ตรวจสอบจาก Object plan ได้ตรงๆ ว่ามีลูกไหม */}
+                          <td> {isPlanCheckedIn(plan) ? ( <span style={{ color: '#2e7d32', fontWeight: 'bold', background: '#e8f5e9', padding: '4px 8px', borderRadius: '4px', }} > ✅ Checked In </span> ) : ( <span style={{ color: '#ed6c02', fontWeight: 'bold' }} > ⏳ Pending </span> )} </td>
                           <td style={{ textAlign: 'center', width: '250px' }}>
-                            {isPlanCheckedIn(plan.id) ? ( <span style={{ color: '#666' }}> อยู่ในลานแล้ว </span> ) : (
+                            {isPlanCheckedIn(plan) ? ( <span style={{ color: '#666' }}> อยู่ในลานแล้ว </span> ) : (
                               <div style={{ display: 'flex', gap: '5px', justifyContent: 'center', }} >
                                 <button onClick={() => setCheckInModal({ isOpen: true, plan, selectedDC: '', }) } className="btn-action assigned" style={{ padding: '6px 10px', fontSize: '13px', }} > 🟢 Check-In </button>
                                 <button onClick={() => { setPlanForm(plan); setShowPlanForm(true); }} className="btn-action call-up" style={{ padding: '6px 10px', fontSize: '13px', background: '#f59e0b', color: 'white', }} > ✏️ Edit </button>
