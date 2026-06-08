@@ -87,32 +87,45 @@ function App() {
     reader.onload = async (event) => {
       try {
         const text = event.target?.result as string;
-        const rows = text.split(/\r?\n/).map((row) => row.trim()).filter((row) => row);
-        if (rows.length < 2) throw new Error('ไฟล์ว่างเปล่า หรือไม่มีข้อมูล');
-        
-        let delimiter = ',';
-        if (rows[0].includes('\t')) delimiter = '\t';
-        else if (rows[0].includes(';') && !rows[0].includes(',')) delimiter = ';';
 
-        const parseCSVLine = (str: string) => {
-          const arr = []; let quote = false; let col = '';
-          for (let i = 0; i < str.length; i++) {
-            if (str[i] === '"') { quote = !quote; } 
-            else if (str[i] === delimiter && !quote) { arr.push(col.trim()); col = ''; } 
-            else { col += str[i]; }
+        // ตรวจ delimiter จากบรรทัดแรก (header ไม่มี newline ซ่อน จึง sniff จากบรรทัดแรกได้ปลอดภัย)
+        const firstLine = (text.split(/\r?\n/)[0]) || '';
+        let delimiter = ',';
+        if (firstLine.includes('\t')) delimiter = '\t';
+        else if (firstLine.includes(';') && !firstLine.includes(',')) delimiter = ';';
+
+        // parser แบบรู้จัก quote: รองรับ field ที่มี newline / delimiter ซ่อนใน "..." และ "" = escape quote
+        const parseCSV = (input: string, delim: string) => {
+          const out: string[][] = []; let row: string[] = []; let col = ''; let quote = false;
+          for (let i = 0; i < input.length; i++) {
+            const ch = input[i];
+            if (quote) {
+              if (ch === '"') { if (input[i + 1] === '"') { col += '"'; i++; } else { quote = false; } }
+              else { col += ch; }
+            } else {
+              if (ch === '"') { quote = true; }
+              else if (ch === delim) { row.push(col); col = ''; }
+              else if (ch === '\r') { /* ข้าม */ }
+              else if (ch === '\n') { row.push(col); out.push(row); row = []; col = ''; }
+              else { col += ch; }
+            }
           }
-          arr.push(col.trim()); return arr;
+          if (col !== '' || row.length > 0) { row.push(col); out.push(row); }
+          return out.filter((r) => r.some((c) => c.trim() !== ''));
         };
 
-        const headers = parseCSVLine(rows[0]).map((h) => h.replace(/^"|"$/g, '').replace(/^\uFEFF/, '').toLowerCase().trim());
+        const allRows = parseCSV(text, delimiter);
+        if (allRows.length < 2) throw new Error('ไฟล์ว่างเปล่า หรือไม่มีข้อมูล');
+
+        const headers = allRows[0].map((h) => h.replace(/^"|"$/g, '').replace(/^\uFEFF/, '').toLowerCase().trim());
         const getCol = (cols: string[], possibleNames: string[]) => {
           const index = headers.findIndex((h) => possibleNames.includes(h));
           return (index !== -1 && cols[index]) ? String(cols[index]).trim() : '';
         };
 
         const insertData = [];
-        for (let i = 1; i < rows.length; i++) {
-          const cols = parseCSVLine(rows[i]);
+        for (let i = 1; i < allRows.length; i++) {
+          const cols = allRows[i];
           if (cols.length < 2) continue; 
           
           let license = getCol(cols, ['license_plate', 'ทะเบียนหัว', 'license', 'ทะเบียนรถ']);
@@ -1194,7 +1207,7 @@ function App() {
               
               <div style={{ display: 'flex', gap: '15px', fontSize: '14px', fontWeight: 'bold', color: '#475569', marginBottom: '15px' }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }}> <div style={{ width: '16px', height: '16px', background: '#22c55e', borderRadius: '4px', }} ></div> ประตูว่าง </span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }} > <div style={{ width: '16px', height: '16px', background: '#ef4444', borderRadius: '4px', }} ></div> มีตู้เปล่า </span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '5px', }} > <div style={{ width: '16px', height: '16px', background: '#ef4444', borderRadius: '4px', }} ></div> มีตู้เปล่าเสียบอยู่ </span>
               </div>
               {masterDocksList.length === 0 ? <p>กำลังโหลด...</p> : renderOutboundHeatmap('admin')}
             </div>
