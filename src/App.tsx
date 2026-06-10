@@ -29,7 +29,13 @@ function App() {
 
   const [dockModal, setDockModal] = useState<{ isOpen: boolean; job: any; docks: any[]; selectedDocks: string[]; requiredCount: number } | null>(null);
 
-  const [adminTab, setAdminTab] = useState<'plan' | 'dashboard' | 'utilization' | 'exec' | 'outbound'>('plan');
+  const [adminTab, setAdminTab] = useState<'plan' | 'dashboard' | 'utilization' | 'exec' | 'outbound' | 'dockutil'>('plan');
+  const [dockUtilDate, setDockUtilDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [dockUtilDC, setDockUtilDC] = useState(MASTER_DCS[0]);
+  const [dockUtilMode, setDockUtilMode] = useState<'inbound' | 'outbound'>('inbound');
+  const [dockUtilInbound, setDockUtilInbound] = useState<any[]>([]);
+  const [dockUtilOutbound, setDockUtilOutbound] = useState<any[]>([]);
+  const [dockUtilLoading, setDockUtilLoading] = useState(false);
   const [dailyPlans, setDailyPlans] = useState<any[]>([]);
   const [planSearchQuery, setPlanSearchQuery] = useState('');
   const [checkInModal, setCheckInModal] = useState<{ isOpen: boolean; plan: any; selectedDC: string } | null>(null);
@@ -276,6 +282,30 @@ function App() {
     return () => clearInterval(timer);
   }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
 
+  // โหลดข้อมูล Dock Utilization เฉพาะตอนเปิดแท็บ/เปลี่ยนวันที่ (ไม่ผูกกับ auto-refresh 3 วิ เพื่อไม่ให้แอปหน่วง)
+  useEffect(() => {
+    if (currentView !== 'admin' || adminTab !== 'dockutil') return;
+    const fetchDockUtilData = async () => {
+      setDockUtilLoading(true);
+      const ds = `${dockUtilDate}T00:00:00.000Z`;
+      const de = `${dockUtilDate}T23:59:59.999Z`;
+      try {
+        const { data: inb } = await supabase.from('backhaul_jobs')
+          .select('dock_number, call_time, on_dock_time, finish_time, status')
+          .not('call_time', 'is', null).lte('call_time', de)
+          .or(`finish_time.gte.${ds},finish_time.is.null`);
+        const { data: outb } = await supabase.from('outbound_jobs')
+          .select('dock_number, on_dock_time, off_dock_time')
+          .not('on_dock_time', 'is', null).lte('on_dock_time', de)
+          .or(`off_dock_time.gte.${ds},off_dock_time.is.null`);
+        setDockUtilInbound(inb || []);
+        setDockUtilOutbound(outb || []);
+      } catch (e) { setDockUtilInbound([]); setDockUtilOutbound([]); }
+      finally { setDockUtilLoading(false); }
+    };
+    fetchDockUtilData();
+  }, [currentView, adminTab, dockUtilDate]);
+
   useEffect(() => {
     if (currentView === 'driver' && driverJobData) {
       const currentStat = driverJobData.status;
@@ -391,6 +421,7 @@ function App() {
     const confirmClear = window.confirm(`คุณต้องการเคลียร์รถออกจากประตู [ ${dockNo} ] ใช่หรือไม่?`);
     if (!confirmClear) return;
     try {
+      await supabase.from('outbound_jobs').update({ off_dock_time: new Date().toISOString() }).eq('dock_number', dockNo).is('off_dock_time', null);
       await supabase.from('master_docks').update({ status: 'Available', current_plate: null, current_job_id: null }).eq('dock_no', dockNo);
       fetchMasterDocksList();
     } catch (error) { alert('❌ เกิดข้อผิดพลาด'); }
@@ -470,9 +501,12 @@ function App() {
       const movingPlate = fromDock?.current_plate || (containerNo ? containerNo.toUpperCase() : null);
       if (toDock) {
         await supabase.from('master_docks').update({ status: 'Occupied', current_plate: movingPlate }).eq('dock_no', destDock);
+        const mc = (movingPlate || '').match(/\(([^)]*)\)/);
+        await supabase.from('outbound_jobs').insert([{ dock_number: destDock, container_no: (containerNo || '').toUpperCase(), carrier: mc ? mc[1].trim() : '', on_dock_time: new Date().toISOString() }]);
       }
       if (fromDock) {
         await supabase.from('master_docks').update({ status: 'Available', current_plate: null, current_job_id: null }).eq('dock_no', originDock);
+        await supabase.from('outbound_jobs').update({ off_dock_time: new Date().toISOString() }).eq('dock_number', originDock).is('off_dock_time', null);
       }
 
       const { data: bJobsIn } = await supabase.from('backhaul_jobs').select('*, daily_plan(*)').eq('status', 'Assigned').like('dock_number', `%${destination}%`);
@@ -761,6 +795,156 @@ function App() {
     ));
   };
 
+  // ===== Dock Utilization Dashboard =====
+  const fmtDur = (mins: number) => { mins = Math.round(mins); if (mins <= 0) return '-'; if (mins < 60) return `${mins} น.`; const h = Math.floor(mins / 60), m = mins % 60; return `${h} ชม.${m ? ' ' + m + ' น.' : ''}`; };
+
+  const computeDockUtil = () => {
+    const ds = Date.parse(`${dockUtilDate}T00:00:00.000Z`);
+    const de = ds + 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const DAY = 1440;
+    const docksAll = masterDocksList.filter((d) => d.physical_dc === dockUtilDC && (dockUtilMode === 'inbound' ? (d.allowed_type === 'Inbound' || d.allowed_type === 'Both') : (d.allowed_type === 'Outbound' || d.allowed_type === 'Both')));
+    const ov = (s: number | null, e: number | null): [number, number] => { if (s == null) return [0, 0]; const a = Math.max(s, ds); const b = Math.min(e == null ? Math.min(now, de) : e, de); return b > a ? [a, b] : [0, 0]; };
+    const sumMin = (ivs: number[][]) => ivs.reduce((s, iv) => s + (iv[1] - iv[0]) / 60000, 0);
+    const docks = docksAll.map((dock) => {
+      const usedIv: number[][] = []; const waitIv: number[][] = []; let trucks = 0;
+      if (dockUtilMode === 'inbound') {
+        dockUtilInbound.filter((j) => (j.dock_number || '').includes(dock.dock_no)).forEach((j) => {
+          const od = j.on_dock_time ? Date.parse(j.on_dock_time) : null;
+          const fin = j.finish_time ? Date.parse(j.finish_time) : null;
+          const cl = j.call_time ? Date.parse(j.call_time) : null;
+          if (od != null) { const iv = ov(od, fin); if (iv[1] > iv[0]) { usedIv.push(iv); trucks++; } }
+          const waitEnd = od != null ? od : now;
+          if (cl != null) { const iv = ov(cl, waitEnd); if (iv[1] > iv[0]) waitIv.push(iv); }
+        });
+      } else {
+        dockUtilOutbound.filter((j) => (j.dock_number || '').includes(dock.dock_no)).forEach((j) => {
+          const od = j.on_dock_time ? Date.parse(j.on_dock_time) : null;
+          const off = j.off_dock_time ? Date.parse(j.off_dock_time) : null;
+          if (od != null) { const iv = ov(od, off); if (iv[1] > iv[0]) { usedIv.push(iv); trucks++; } }
+        });
+      }
+      let usedMin = sumMin(usedIv); let waitMin = sumMin(waitIv);
+      if (usedMin > DAY) usedMin = DAY;
+      if (usedMin + waitMin > DAY) waitMin = Math.max(0, DAY - usedMin);
+      const idleMin = Math.max(0, DAY - usedMin - waitMin);
+      const hourly: string[] = [];
+      for (let h = 0; h < 24; h++) {
+        const hs = ds + h * 3600000; const he = hs + 3600000;
+        const hit = (ivs: number[][]) => ivs.some((iv) => iv[1] > hs && iv[0] < he);
+        hourly.push(hit(usedIv) ? 'u' : (hit(waitIv) ? 'w' : 'i'));
+      }
+      return { no: dock.dock_no, usedMin, waitMin, idleMin, trucks, util: Math.round(usedMin / DAY * 100), dwell: trucks > 0 ? usedMin / trucks : 0, hourly };
+    });
+    const total = docks.length;
+    const usedDocks = docks.filter((r) => r.trucks > 0).length;
+    const avgUtil = total > 0 ? Math.round(docks.reduce((s, r) => s + r.util, 0) / total) : 0;
+    const idleAvgH = total > 0 ? (docks.reduce((s, r) => s + r.idleMin, 0) / total / 60) : 0;
+    const totUsed = docks.reduce((s, r) => s + r.usedMin, 0);
+    const totTrucks = docks.reduce((s, r) => s + r.trucks, 0);
+    const turnaround = totTrucks > 0 ? totUsed / totTrucks : 0;
+    return { docks, total, usedDocks, avgUtil, idleAvgH, turnaround };
+  };
+
+  const renderDockUtilDashboard = () => {
+    const col: any = { u: '#2563eb', w: '#f59e0b', i: '#e2e8f0' };
+    const data = computeDockUtil();
+    const kpis = [
+      { l: 'Utilization เฉลี่ย', v: `${data.avgUtil}%`, s: 'ของทั้งคลัง' },
+      { l: 'ประตูที่ใช้งานวันนี้', v: `${data.usedDocks} / ${data.total}`, s: 'ใช้จริง / ทั้งหมด' },
+      { l: 'Idle เฉลี่ย', v: `${data.idleAvgH.toFixed(1)} ชม.`, s: 'ต่อประตู ต่อวัน' },
+      { l: 'Turnaround เฉลี่ย', v: fmtDur(data.turnaround), s: 'เวลาบนประตู/คัน' },
+    ];
+    const btn = (active: boolean, bg: string) => ({ padding: '8px 16px', fontSize: '14px', fontWeight: 'bold' as const, border: 'none', borderRadius: 0, cursor: 'pointer', background: active ? bg : '#f1f5f9', color: active ? 'white' : '#64748b' });
+    return (
+      <div className="dashboard-card" style={{ background: '#f8fafc', border: 'none' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '20px', borderBottom: '2px solid #e2e8f0', paddingBottom: '12px' }}>
+          <h3 style={{ margin: 0, color: '#0f766e' }}>📊 Dock Utilization</h3>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <input type="date" value={dockUtilDate} onChange={(e) => setDockUtilDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px' }} />
+            <select value={dockUtilDC} onChange={(e) => setDockUtilDC(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px' }}>
+              {MASTER_DCS.map((dc) => <option key={dc} value={dc}>{dc}</option>)}
+            </select>
+            <span style={{ display: 'inline-flex', border: '1px solid #ccc', borderRadius: '6px', overflow: 'hidden' }}>
+              <button onClick={() => setDockUtilMode('inbound')} style={btn(dockUtilMode === 'inbound', '#1976d2')}>Inbound</button>
+              <button onClick={() => setDockUtilMode('outbound')} style={btn(dockUtilMode === 'outbound', '#8b5cf6')}>Outbound</button>
+            </span>
+          </div>
+        </div>
+
+        {dockUtilLoading ? <p style={{ textAlign: 'center', padding: '30px' }}>กำลังโหลด...</p> : data.total === 0 ? <p style={{ textAlign: 'center', padding: '30px', color: '#64748b' }}>ไม่มีประตู {dockUtilMode === 'inbound' ? 'Inbound' : 'Outbound'} ในคลัง {dockUtilDC}</p> : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+            {kpis.map((k, i) => (
+              <div key={i} style={{ background: 'white', borderRadius: '10px', padding: '15px 18px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
+                <div style={{ fontSize: '13px', color: '#64748b' }}>{k.l}</div>
+                <div style={{ fontSize: '24px', fontWeight: 'bold', marginTop: '4px', color: '#1e293b' }}>{k.v}</div>
+                <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>{k.s}</div>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ background: 'white', borderRadius: '10px', padding: '18px', marginBottom: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '14px' }}>
+              <span style={{ fontSize: '15px', fontWeight: 'bold' }}>การใช้งานรายชั่วโมง (ประตู × 24 ชม.)</span>
+              <div style={{ display: 'flex', gap: '14px', fontSize: '12px', color: '#64748b' }}>
+                <span><span style={{ display: 'inline-block', width: '11px', height: '11px', borderRadius: '2px', background: col.u, verticalAlign: '-1px', marginRight: '4px' }} />ใช้งานจริง</span>
+                {dockUtilMode === 'inbound' && <span><span style={{ display: 'inline-block', width: '11px', height: '11px', borderRadius: '2px', background: col.w, verticalAlign: '-1px', marginRight: '4px' }} />รอรถ</span>}
+                <span><span style={{ display: 'inline-block', width: '11px', height: '11px', borderRadius: '2px', background: col.i, verticalAlign: '-1px', marginRight: '4px' }} />ว่าง</span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+              {data.docks.map((d) => (
+                <div key={d.no} style={{ display: 'flex', alignItems: 'center' }}>
+                  <span style={{ width: '58px', fontSize: '12px', color: '#64748b', flex: 'none' }}>{d.no}</span>
+                  <div style={{ display: 'flex', gap: '1px', flex: 1 }}>
+                    {d.hourly.map((s, h) => <div key={h} title={`${d.no} · ${String(h).padStart(2, '0')}:00`} style={{ flex: 1, height: '20px', borderRadius: '2px', background: col[s] }} />)}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', margin: '6px 0 0 58px', fontSize: '11px', color: '#94a3b8' }}>
+              <span>00</span><span>06</span><span>12</span><span>18</span><span>24</span>
+            </div>
+          </div>
+
+          <div style={{ background: 'white', borderRadius: '10px', padding: '18px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
+            <p style={{ margin: '0 0 12px', fontSize: '15px', fontWeight: 'bold' }}>รายละเอียดต่อประตู</p>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', color: '#64748b', borderBottom: '2px solid #e2e8f0' }}>
+                    <th style={{ padding: '8px 6px' }}>ประตู</th>
+                    <th style={{ padding: '8px 6px', textAlign: 'right' }}>ใช้งาน</th>
+                    {dockUtilMode === 'inbound' && <th style={{ padding: '8px 6px', textAlign: 'right' }}>รอรถ</th>}
+                    <th style={{ padding: '8px 6px', textAlign: 'right' }}>ว่าง</th>
+                    <th style={{ padding: '8px 6px', textAlign: 'right' }}>Util%</th>
+                    <th style={{ padding: '8px 6px', textAlign: 'right' }}>รถ</th>
+                    <th style={{ padding: '8px 6px', textAlign: 'right' }}>Turnaround</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.docks.map((d) => (
+                    <tr key={d.no} style={{ borderBottom: '1px solid #f1f5f9' }}>
+                      <td style={{ padding: '8px 6px', fontWeight: 'bold' }}>{d.no}</td>
+                      <td style={{ padding: '8px 6px', textAlign: 'right' }}>{(d.usedMin / 60).toFixed(1)} ชม.</td>
+                      {dockUtilMode === 'inbound' && <td style={{ padding: '8px 6px', textAlign: 'right', color: '#d97706' }}>{(d.waitMin / 60).toFixed(1)} ชม.</td>}
+                      <td style={{ padding: '8px 6px', textAlign: 'right', color: '#64748b' }}>{(d.idleMin / 60).toFixed(1)} ชม.</td>
+                      <td style={{ padding: '8px 6px', textAlign: 'right', fontWeight: 'bold' }}>{d.util}%</td>
+                      <td style={{ padding: '8px 6px', textAlign: 'right' }}>{d.trucks}</td>
+                      <td style={{ padding: '8px 6px', textAlign: 'right' }}>{d.dwell ? fmtDur(d.dwell) : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+        )}
+      </div>
+    );
+  };
+
   // สีประตูบน Outbound Heatmap: ว่าง=เขียว / VCG=น้ำเงิน / PRT=ส้ม / อื่นๆ=เทา
   const getDockColor = (dock: any) => {
     if (dock.status !== 'Occupied') return '#22c55e';
@@ -985,6 +1169,7 @@ function App() {
             <button onClick={() => setAdminTab('utilization')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'utilization' ? '#10b981' : '#f1f5f9', color: adminTab === 'utilization' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📊 Dock Inb.Heatmap </button>
             <button onClick={() => setAdminTab('outbound')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'outbound' ? '#8b5cf6' : '#f1f5f9', color: adminTab === 'outbound' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📦 Dock Outb.Heatmap </button>
             <button onClick={() => setAdminTab('exec')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'exec' ? '#f59e0b' : '#f1f5f9', color: adminTab === 'exec' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📈 Dashboard </button>
+            <button onClick={() => setAdminTab('dockutil')} style={{ padding: '10px 20px', fontSize: '16px', fontWeight: 'bold', background: adminTab === 'dockutil' ? '#0f766e' : '#f1f5f9', color: adminTab === 'dockutil' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📊 Dock Utilization </button>
           </div>
 
           {adminTab === 'exec' && (
@@ -1212,6 +1397,8 @@ function App() {
               {masterDocksList.length === 0 ? <p>กำลังโหลด...</p> : renderOutboundHeatmap('admin')}
             </div>
           )}
+
+          {adminTab === 'dockutil' && renderDockUtilDashboard()}
         </div>
       )}
 
