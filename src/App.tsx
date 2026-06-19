@@ -210,17 +210,6 @@ function App() {
       fetchMasterDocksList();
     } catch (e) { alert('❌ เกิดข้อผิดพลาด อาจต้องตรวจสอบคอลัมน์ is_active ในฐานข้อมูล'); }
   };
-
-  const handleForemanDrop = async (dockNo: string) => {
-    try {
-      const now = new Date().toISOString();
-      await supabase.from('outbound_jobs').update({ status: 'Dropped', off_dock_time: now }).eq('dock_number', dockNo).is('off_dock_time', null);
-      await supabase.from('master_docks').update({ status: 'Available', current_plate: null, current_job_id: null }).eq('dock_no', dockNo);
-      setForemanActionModal(null);
-      fetchMasterDocksList();
-      alert(`✅ Drop ลานสำเร็จ — บันทึกเวลาออก ${new Date(now).toLocaleTimeString('th-TH')}`);
-    } catch (e) { alert('❌ เกิดข้อผิดพลาด'); }
-  };
   
   const fetchOutboundJobs = async () => {
     const startOfDay = `${filterDate}T00:00:00.000Z`; 
@@ -291,13 +280,13 @@ function App() {
     if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs();
     if (currentView === 'driver') fetchDriverJob();
     if (currentView === 'yard') { fetchYardOrders(); fetchMasterDocksList(); fetchAllDocksForAdmin(); }
-    if (currentView === 'shunt') { fetchShuntOrders(); fetchMasterDocksList(); }
+    if (currentView === 'shunt') { fetchShuntOrders(); fetchMasterDocksList(); fetchOutboundJobs(); }
     const timer = setInterval(() => {
       if (currentView === 'admin') { fetchAllJobs(); fetchDailyPlans(); fetchMasterDocksList(); fetchAllDocksForAdmin(); fetchOutboundJobs(); }
       if (currentView === 'receiver' || currentView === 'unloader') fetchWaitingJobs();
       if (currentView === 'driver') fetchDriverJob();
       if (currentView === 'yard') { fetchYardOrders(); fetchMasterDocksList(); fetchAllDocksForAdmin(); }
-      if (currentView === 'shunt') { fetchShuntOrders(); fetchMasterDocksList(); }
+      if (currentView === 'shunt') { fetchShuntOrders(); fetchMasterDocksList(); fetchOutboundJobs(); }
     }, 3000);
     return () => clearInterval(timer);
   }, [currentView, receiverDC, driverJobData, shuntCompany, filterDate]);
@@ -372,8 +361,10 @@ function App() {
     try {
       const now = new Date().toISOString();
       const displayPlate = `${containerNo.toUpperCase()} (${carrier})`;
+      
       await supabase.from('outbound_jobs').insert([{ dock_number: dockNo, container_no: containerNo.toUpperCase(), carrier: carrier, on_dock_time: now, status: 'On Dock' }]);
       await supabase.from('master_docks').update({ status: 'Occupied', current_plate: displayPlate }).eq('dock_no', dockNo);
+      
       alert(`✅ บันทึกตู้ ${containerNo} เข้าประตู ${dockNo} สำเร็จ!`);
       setOutboundModal(null);
       fetchMasterDocksList();
@@ -397,6 +388,9 @@ function App() {
     setLoading(true);
     try {
       const now = new Date().toISOString();
+      // 💡 อัปเดต State ในหน้าจอก่อนเพื่อให้เห็นทันที ไม่ต้องรอรีเฟรช
+      setOutboundJobs(prev => prev.map(job => (job.dock_number === dropModal.dockNo && !job.off_dock_time) ? { ...job, status: 'Dropped', off_dock_time: now } : job));
+      
       await supabase.from('outbound_jobs').update({ status: 'Dropped', off_dock_time: now }).eq('dock_number', dropModal.dockNo).is('off_dock_time', null);
       await supabase.from('master_docks').update({ status: 'Available', current_plate: null, current_job_id: null }).eq('dock_no', dropModal.dockNo);
       setDropModal(null);
@@ -434,7 +428,11 @@ function App() {
       });
       const { error } = await supabase.from('orders').insert([{ company_id: matched ? matched.id : null, container_no: (containerNo || '').toUpperCase(), origin: originDock.toUpperCase(), destination: destDock.toUpperCase(), status: 'pending', }]);
       if (error) throw error;
+      
+      // 💡 เปลี่ยนสถานะเป็น "กำลังย้าย" (Moving) และอัปเดตหน้าจอทันทีเพื่อล็อกปุ่ม
+      setOutboundJobs(prev => prev.map(job => (job.dock_number === originDock && !job.off_dock_time) ? { ...job, status: 'Moving' } : job));
       await supabase.from('outbound_jobs').update({ status: 'Moving' }).eq('dock_number', originDock).is('off_dock_time', null);
+      
       alert(`✅ สั่งย้ายตู้จากประตู ${originDock} ไป ${destDock} สำเร็จ!`);
       setMoveModal(null);
       fetchYardOrders();
@@ -494,6 +492,7 @@ function App() {
       }
       fetchShuntOrders();
       fetchMasterDocksList();
+      fetchOutboundJobs(); // อัปเดตสถานะของ Outbound Jobs เพื่อให้กราฟและประตูโชว์สถานะล่าสุด
     } catch (error) { alert('❌ เกิดข้อผิดพลาด'); }
   };
 
@@ -517,6 +516,7 @@ function App() {
     try {
       const isT18W = planData.transport_type === 'T18W'; const isSpecialCompany = planData.transport_company?.includes('พรอรุณ') || planData.transport_company?.includes('คาร์โก้');
       let queueNo = ''; 
+      
       const now = new Date(); 
       let queueDate = new Date(now);
       if (now.getHours() < 7) { queueDate.setDate(queueDate.getDate() - 1); }
@@ -728,6 +728,22 @@ function App() {
     };
   };
 
+  const getDockUtilization = () => {
+    const usageByDC: any = {};
+    MASTER_DCS.forEach(dc => usageByDC[dc] = { totalIn: 0, occIn: 0 });
+
+    masterDocksList.forEach(dock => {
+      const dc = dock.physical_dc;
+      if (!usageByDC[dc]) return;
+      const isOccupied = dock.status === 'Occupied';
+      if (dock.allowed_type === 'Inbound' || dock.allowed_type === 'Both') {
+        usageByDC[dc].totalIn++;
+        if (isOccupied) usageByDC[dc].occIn++;
+      }
+    });
+    return usageByDC;
+  };
+
   const getWait = (dc: string) => { const s = execData.dcStats?.[dc]; return s && s.waitCount > 0 ? (s.waitSum / s.waitCount).toFixed(0) : '0'; };
   const getLoad = (dc: string) => { const s = execData.dcStats?.[dc]; return s && s.loadCount > 0 ? (s.loadSum / s.loadCount).toFixed(0) : '0'; };
   const getCompanyName = (companies: any, companyId?: string) => {
@@ -773,7 +789,7 @@ function App() {
     return '#9ca3af';
   };
 
-  // 💡 โค้ดเรนเดอร์ปุ่มที่ปลดล็อคแล้ว!
+  // 💡 โค้ดเรนเดอร์แผนผังแบบมีระบบ "ล็อคปุ่มกันเบิ้ล"
   const renderOutboundHeatmap = (role: 'admin' | 'shunt' | 'tpt') => {
     const outboundDocks = masterDocksList.filter(dock => dock.allowed_type === 'Outbound' || dock.allowed_type === 'Both');
     const grouped = outboundDocks.reduce((acc, dock) => { if (!acc[dock.physical_dc]) acc[dock.physical_dc] = []; acc[dock.physical_dc].push(dock); return acc; }, {} as any);
@@ -786,6 +802,7 @@ function App() {
           <span><span style={legendDot('#22c55e')} />ว่าง</span>
           <span><span style={legendDot('#2563eb')} />VCG</span>
           <span><span style={legendDot('#f97316')} />PRT</span>
+          <span><span style={legendDot('#f59e0b')} />กำลังย้าย</span>
           <span><span style={legendDot('#9ca3af')} />อื่นๆ</span>
         </div>
         {Object.keys(grouped).sort().map((dc) => (
@@ -794,16 +811,26 @@ function App() {
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '15px' }}>
               {grouped[dc].map((dock: any) => {
                 const isOccupied = dock.status === 'Occupied'; 
-                const color = getDockColor(dock);
                 
-                // 💡 ปลดล็อค: Shunt และ Foreman สามารถจิ้มได้ทุกประตู (isClickable = true เสมอ)
+                // 💡 Check if container is currently moving
+                const activeOutbound = outboundJobs.find(j => j.dock_number === dock.dock_no && !j.off_dock_time);
+                const isMoving = activeOutbound?.status === 'Moving';
+
+                let color = getDockColor(dock);
+                if (isMoving) color = '#f59e0b'; // สีส้มเตือนว่ากำลังย้าย
+                
+                // 💡 ล็อกไม่ให้โฟร์แมนหรือแอดมิน TPT กดสั่งย้ายซ้ำถ้าระบบบันทึกว่า 'กำลังย้าย' อยู่
                 let isClickable = false;
                 if (role === 'shunt') {
-                  isClickable = true; 
+                  if (shuntCompany === 'FOREMAN') {
+                     isClickable = isOccupied && !isMoving; // ห้าม Foreman กด Drop ลานซ้ำถ้ากำลังย้าย
+                  } else {
+                     isClickable = !isOccupied; // คันลากกดได้เฉพาะประตูว่าง
+                  }
                 } else if (role === 'tpt') {
-                  isClickable = isOccupied; // AdminTPT จิ้มสั่งย้ายเฉพาะประตูที่ไม่ว่าง
+                  isClickable = isOccupied && !isMoving; // ห้าม AdminTPT กดสั่งย้ายซ้ำ
                 } else if (role === 'admin') {
-                  isClickable = isOccupied; // Admin จิ้มเคลียร์เฉพาะประตูที่ไม่ว่าง
+                  isClickable = isOccupied; // Admin ใหญ่ ให้กดเคลียร์ได้เสมอเผื่อบั๊ก
                 }
 
                 return (
@@ -813,17 +840,11 @@ function App() {
                       if (role === 'shunt') {
                         if (!isOccupied) {
                           setOutboundModal({ isOpen: true, dockNo: dock.dock_no, containerNo: '', carrier: (shuntCompany === 'PRT' || shuntCompany === 'VCG') ? shuntCompany : '' });
-                        } else {
-                          // ถ้าไม่ว่าง: Foreman เปิด Drop / Shunt เปิดสั่งย้ายตู้
-                          if (shuntCompany === 'FOREMAN') {
-                            const m = (dock.current_plate || '').match(/^(.*?)\s*\((.*)\)\s*$/);
-                            setDropModal({ isOpen: true, dockNo: dock.dock_no, containerNo: m ? m[1].trim() : (dock.current_plate || ''), carrier: m ? m[2].trim() : '' });
-                          } else {
-                            const m = (dock.current_plate || '').match(/^(.*?)\s*\((.*)\)\s*$/);
-                            setMoveModal({ isOpen: true, originDock: dock.dock_no, containerNo: m ? m[1].trim() : (dock.current_plate || ''), carrier: m ? m[2].trim() : '', destDock: '' });
-                          }
+                        } else if (shuntCompany === 'FOREMAN' && isOccupied && !isMoving) {
+                          const m = (dock.current_plate || '').match(/^(.*?)\s*\((.*)\)\s*$/);
+                          setDropModal({ isOpen: true, dockNo: dock.dock_no, containerNo: m ? m[1].trim() : (dock.current_plate || ''), carrier: m ? m[2].trim() : '' });
                         }
-                      } else if (role === 'tpt' && isOccupied) {
+                      } else if (role === 'tpt' && isOccupied && !isMoving) {
                         const m = (dock.current_plate || '').match(/^(.*?)\s*\((.*)\)\s*$/);
                         setMoveModal({ isOpen: true, originDock: dock.dock_no, containerNo: m ? m[1].trim() : (dock.current_plate || ''), carrier: m ? m[2].trim() : '', destDock: '' });
                       } else if (role === 'admin' && isOccupied) {
@@ -834,7 +855,11 @@ function App() {
                     style={{ width: '80px', height: '80px', backgroundColor: color, color: 'white', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: '8px', border: 'none', cursor: isClickable ? 'pointer' : 'not-allowed', boxShadow: 'inset 0 -2px 0 rgba(0,0,0,0.1)', padding: '5px' }}
                   >
                     <span style={{ fontSize: '18px', fontWeight: '900' }}> {dock.dock_no} </span>
-                    {isOccupied && ( <span style={{ fontSize: '10px', background: 'rgba(0,0,0,0.25)', padding: '2px 4px', borderRadius: '4px', marginTop: '3px', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} > {dock.current_plate || 'มีรถ'} </span> )}
+                    {isOccupied && ( 
+                      <span style={{ fontSize: '10px', background: 'rgba(0,0,0,0.25)', padding: '2px 4px', borderRadius: '4px', marginTop: '3px', width: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} > 
+                        {isMoving ? '⏳ กำลังย้าย' : (dock.current_plate || 'มีรถ')} 
+                      </span> 
+                    )}
                   </button>
                 );
               })}
@@ -938,7 +963,7 @@ function App() {
 
   const fmtDur = (mins: number) => { mins = Math.round(mins); if (mins <= 0) return '-'; if (mins < 60) return `${mins} น.`; const h = Math.floor(mins / 60), m = mins % 60; return `${h} ชม.${m ? ' ' + m + ' น.' : ''}`; };
   const computeDockUtil = () => { /* ฟังก์ชันคํานวณ Utilization คงเดิม */ return { docks: [], total: 0, usedDocks: 0, avgUtil: 0, idleAvgH: 0, turnaround: 0 }; };
-  const renderDockUtilDashboard = () => { return (<div/>); }; // โค้ดนี้ถูกข้ามเพื่อความสั้นกระชับ สามารถใช้ของเดิมได้เลยครับ
+  const renderDockUtilDashboard = () => { return (<div/>); }; // ข้ามโค้ดส่วนยาว
 
   if (currentView === 'login') {
     return (
@@ -957,6 +982,8 @@ function App() {
   }
 
   const execData = getExecDashboardKPIs();
+  const utilData = getDockUtilization();
+
   const totalPlansToday = dailyPlans.length;
   const returnedPlansCount = dailyPlans.filter(p => isPlanCheckedIn(p)).length;
   const notReturnedPlansCount = totalPlansToday - returnedPlansCount;
@@ -1031,12 +1058,33 @@ function App() {
 
           {adminTab === 'plan' && (
             <div className="dashboard-card">
+              
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '15px', marginBottom: '20px' }}>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #1976d2', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Actual Truck</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#1e293b' }}>{totalPlansToday} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #10b981', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Returned</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#10b981' }}>{returnedPlansCount} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #ef4444', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Not Return</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#ef4444' }}>{notReturnedPlansCount} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+                <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px', borderLeft: '4px solid #8b5cf6', boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+                  <div style={{ color: '#64748b', fontSize: '13px', fontWeight: 'bold' }}>Direct</div>
+                  <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#8b5cf6' }}>{directPlansCount} <span style={{fontSize:'12px', color:'#94a3b8'}}>คัน</span></div>
+                </div>
+              </div>
+
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px', flexWrap: 'wrap', gap: '10px', }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '10px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px' }} />
-                  <input type="text" placeholder="🔍 ค้นหา Job, ทะเบียนรถ..." value={planSearchQuery} onChange={(e) => setPlanSearchQuery(e.target.value)} style={{ padding: '10px', width: '300px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px', }} />
+                  <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '10px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px', background: '#fff' }} />
+                  <input type="text" placeholder="🔍 ค้นหา Job, VD.Code, ทะเบียนรถ, บริษัทขนส่ง" value={planSearchQuery} onChange={(e) => setPlanSearchQuery(e.target.value)} style={{ padding: '10px', width: '100%', minWidth: '300px', maxWidth: '450px', border: '1px solid #ccc', borderRadius: '6px', fontSize: '16px', }} />
                 </div>
-                <div style={{ display: 'flex', gap: '10px' }}>
+                
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                   <input type="file" accept=".csv" ref={fileInputRef} onChange={handleImportCSV} style={{ display: 'none' }} />
                   <button onClick={() => fileInputRef.current?.click()} className="btn-action call-up" style={{ padding: '10px 20px', fontSize: '16px', background: '#475569', color: 'white', border: 'none', }} disabled={loading} > {loading ? '⏳ กำลังนำเข้า...' : '📥 นำเข้าไฟล์ CSV'} </button>
                   <button onClick={() => { setPlanForm({...initialPlanForm, schedule_date: filterDate}); setShowPlanForm(true); }} className="btn-action on-dock" style={{ padding: '10px 20px', fontSize: '16px' }} > ➕ เพิ่มรายการรถ </button>
@@ -1044,22 +1092,39 @@ function App() {
               </div>
               <div className="table-responsive">
                 <table className="dashboard-table">
-                  <thead> <tr> <th>บริษัทขนส่ง</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
+                  <thead> <tr> <th>บริษัทขนส่ง</th> <th>Job No</th> <th>Vendor</th> <th>ทะเบียนรถ</th> <th>ชื่อ พขร.</th> <th>ประเภท</th> <th>สถานะ</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
-                    {filteredPlans.length === 0 ? ( <tr> <td colSpan={6} style={{ textAlign: 'center', padding: '20px' }}> ไม่พบข้อมูล </td> </tr> ) : (
+                    {filteredPlans.length === 0 ? ( <tr> <td colSpan={8} style={{ textAlign: 'center', padding: '20px' }} > ไม่พบข้อมูลแผนงานของวันที่ {new Date(filterDate).toLocaleDateString('th-TH')} </td> </tr> ) : (
                       filteredPlans.map((plan) => {
                         const planStatus = getPlanActiveStatus(plan);
+                        
                         return (
                           <tr key={plan.id}>
-                            <td style={{ fontWeight: 'bold' }}> {plan.transport_company || '-'} </td>
-                            <td>{plan.job_no || '-'}</td>
-                            <td>{plan.vendor_name || '-'}</td>
+                            <td style={{ color: '#555', fontWeight: 'bold' }}> {plan.transport_company || '-'} </td>
+                            <td>
+                              {plan.job_no || '-'}
+                              {plan.subjobtype === 'BH01' && <span style={{display: 'inline-block', marginLeft: '8px', background: '#e0e7ff', color: '#4338ca', fontSize: '11px', padding: '2px 6px', borderRadius: '4px'}}>Direct</span>}
+                            </td>
+                            <td className="vendor-cell"> {plan.vendor_code && ( <span style={{ color: '#64748b', fontSize: '13px', display: 'block', fontWeight: 'normal', }} > [{plan.vendor_code}] </span> )} {plan.vendor_name || '-'} </td>
                             <td style={{ fontWeight: 'bold' }}> {getDisplayPlate(plan)} </td>
-                            <td> {planStatus ? ( <span className={`status-badge ${planStatus.replace(' ', '-')}`} > {planStatus} </span> ) : ( <span style={{ color: '#ed6c02', fontWeight: 'bold' }} > ⏳ Pending </span> )} </td>
-                            <td style={{ textAlign: 'center' }}>
-                              {planStatus ? ( <span style={{ color: '#666', fontWeight: 'bold' }}> {planStatus === 'Finish' ? '✅ จบงานแล้ว' : '🚚 อยู่ในลาน'} </span> ) : (
+                            <td style={{ color: '#0f172a' }}>{plan.driver_name || '-'}</td>
+                            <td>{plan.transport_type || '-'}</td>
+                            <td> 
+                              {planStatus ? ( 
+                                <span className={`status-badge ${planStatus.replace(' ', '-')}`} > {planStatus} </span> 
+                              ) : ( 
+                                <span style={{ color: '#ed6c02', fontWeight: 'bold' }} > ⏳ Pending </span> 
+                              )} 
+                            </td>
+                            <td style={{ textAlign: 'center', width: '250px' }}>
+                              {planStatus ? ( 
+                                <span style={{ color: '#666', fontWeight: 'bold' }}> 
+                                  {planStatus === 'Finish' ? '✅ จบงานแล้ว' : '🚚 อยู่ในลาน'} 
+                                </span> 
+                              ) : (
                                 <div style={{ display: 'flex', gap: '5px', justifyContent: 'center', }} >
                                   <button onClick={() => setCheckInModal({ isOpen: true, plan, selectedDC: '', }) } className="btn-action assigned" style={{ padding: '6px 10px', fontSize: '13px', }} > 🟢 Check-In </button>
+                                  <button onClick={() => { setPlanForm(plan); setShowPlanForm(true); }} className="btn-action call-up" style={{ padding: '6px 10px', fontSize: '13px', background: '#f59e0b', color: 'white', }} > ✏️ Edit </button>
                                   <button onClick={() => handleCancelPlan(plan.id)} className="btn-rollback" style={{ padding: '6px 10px', fontSize: '13px', }} > ❌ Cancel </button>
                                 </div>
                               )}
@@ -1076,17 +1141,26 @@ function App() {
 
           {adminTab === 'dashboard' && (
             <div className="dashboard-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', flexWrap: 'wrap', gap: '10px', }}>
+                <h3 style={{ margin: 0 }}>📊 BH Truck Inbound</h3>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px', }} />
+                  <button onClick={handleExportCSV} style={{ background: '#10b981', color: 'white', border: 'none', padding: '10px 15px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.1)', }} > 📥 ดาวน์โหลดไฟล์ CSV </button>
+                </div>
+              </div>
               <div className="table-responsive">
                 <table className="dashboard-table">
-                  <thead> <tr> <th>เวลา Check In</th> <th>Queue</th> <th>ลงสินค้า</th> <th>ทะเบียนรถ</th> <th>บริษัทขนส่ง</th> <th>Dock (ประวัติ)</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
+                  <thead> <tr> <th>เวลา Check In</th> <th>Queue</th> <th>ลงสินค้า</th> <th>ทะเบียนรถ</th> <th>บริษัทขนส่ง</th> <th>ประเภทรถ</th> <th>Vendor</th> <th>Dock (ประวัติ)</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                   <tbody>
-                    {(Object.values(allJobs.reduce((acc: any, job: any) => { const pId = job.daily_plan_id; if (!acc[pId]) { acc[pId] = { ...job, combined_docks: job.dock_number ? [job.dock_number] : [] }; } else { const newDocks = job.dock_number ? [...acc[pId].combined_docks, job.dock_number] : acc[pId].combined_docks; acc[pId] = { ...job, combined_docks: newDocks }; } return acc; }, {})) as any[]).map((job) => (
+                    {(displayJobs as any[]).map((job) => (
                       <tr key={job.id}>
                         <td> {new Date(job.check_in_time).toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', })} น. </td>
                         <td> <strong>{displayQueue(job.queue_number)}</strong> </td>
                         <td> <span style={{ background: '#e3f2fd', color: '#1565c0', padding: '4px 8px', borderRadius: '4px', fontWeight: 'bold', fontSize: '13px', }} > {getDCRoute(job.queue_number)} </span> </td>
                         <td>{getDisplayPlate(job.daily_plan)}</td>
                         <td style={{ fontWeight: 'bold', color: '#555' }}> {job.daily_plan?.transport_company || '-'} </td>
+                        <td>{job.daily_plan?.transport_type}</td>
+                        <td className="vendor-cell"> {job.daily_plan?.vendor_code && ( <span style={{ color: '#64748b', fontSize: '11px', display: 'block', }} > [{job.daily_plan.vendor_code}] </span> )} {job.daily_plan?.vendor_name || '-'} </td>
                         <td> <span className="dock-badge" style={{whiteSpace: 'nowrap'}}> {job.combined_docks.join(' ➡️ ') || '-'} </span> </td>
                         <td> <span className={`status-badge ${job.status.replace( ' ', '-' )}`} > {job.status} </span> </td>
                         <td style={{ textAlign: 'center' }}> {renderActionButton(job)} </td>
@@ -1100,38 +1174,55 @@ function App() {
 
           {adminTab === 'utilization' && (
             <div className="dashboard-card" style={{ background: '#f8fafc', border: 'none' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #e2e8f0', paddingBottom: '10px' }}>
+                <h3 style={{ margin: 0, color: '#334155' }}> 🏢 Live Inbound Heatmap </h3>
+                <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px', }} />
+              </div>
+
               <div style={{ marginBottom: '20px', background: 'white', borderRadius: '10px', padding: '15px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
-                <p style={{ margin: '0 0 12px', fontWeight: 'bold', color: '#334155' }}>⚙️ จัดการประตู Inbound</p>
+                <p style={{ margin: '0 0 12px', fontWeight: 'bold', color: '#334155' }}>⚙️ จัดการประตู (Active / Inactive)</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                   {allDocksList.filter((d: any) => d.allowed_type === 'Inbound' || d.allowed_type === 'Both').map((d: any) => (
                     <button key={d.id} onClick={() => handleToggleDockActive(d.dock_no, d.is_active)}
-                      style={{ padding: '6px 14px', borderRadius: '20px', border: '2px solid', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', background: d.is_active ? '#dbeafe' : '#f1f5f9', color: d.is_active ? '#1d4ed8' : '#94a3b8', borderColor: d.is_active ? '#1d4ed8' : '#cbd5e1' }}>
+                      title={d.is_active ? 'คลิกเพื่อปิดใช้งาน' : 'คลิกเพื่อเปิดใช้งาน'}
+                      style={{ padding: '6px 14px', borderRadius: '20px', border: '2px solid', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', background: d.is_active ? '#dbeafe' : '#f1f5f9', color: d.is_active ? '#1d4ed8' : '#94a3b8', borderColor: d.is_active ? '#1d4ed8' : '#cbd5e1', transition: 'all 0.2s' }}>
                       {d.dock_no} {d.is_active ? '✅' : '❌'}
                     </button>
                   ))}
                 </div>
+                <p style={{ margin: '10px 0 0', fontSize: '12px', color: '#94a3b8' }}>✅ = Active · ❌ = Inactive</p>
               </div>
+
               {renderHeatmap()}
             </div>
           )}
 
           {adminTab === 'outbound' && (
             <div className="dashboard-card" style={{ background: '#f8fafc', border: 'none' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #e2e8f0', paddingBottom: '10px' }}>
+                <h3 style={{ margin: 0, color: '#8b5cf6' }}> 📦 Live Outbound Heatmap </h3>
+                <input type="date" value={filterDate} onChange={(e) => setFilterDate(e.target.value)} style={{ padding: '8px', border: '1px solid #ccc', borderRadius: '6px', }} />
+              </div>
+
               <div style={{ marginBottom: '20px', background: 'white', borderRadius: '10px', padding: '15px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
-                <p style={{ margin: '0 0 12px', fontWeight: 'bold', color: '#334155' }}>⚙️ จัดการประตู Outbound</p>
+                <p style={{ margin: '0 0 12px', fontWeight: 'bold', color: '#334155' }}>⚙️ จัดการประตู (Active / Inactive)</p>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                   {allDocksList.filter((d: any) => d.allowed_type === 'Outbound' || d.allowed_type === 'Both').map((d: any) => (
                     <button key={d.id} onClick={() => handleToggleDockActive(d.dock_no, d.is_active)}
-                      style={{ padding: '6px 14px', borderRadius: '20px', border: '2px solid', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', background: d.is_active ? '#dcfce7' : '#f1f5f9', color: d.is_active ? '#16a34a' : '#94a3b8', borderColor: d.is_active ? '#16a34a' : '#cbd5e1' }}>
+                      title={d.is_active ? 'คลิกเพื่อปิดใช้งาน' : 'คลิกเพื่อเปิดใช้งาน'}
+                      style={{ padding: '6px 14px', borderRadius: '20px', border: '2px solid', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', background: d.is_active ? '#dcfce7' : '#f1f5f9', color: d.is_active ? '#16a34a' : '#94a3b8', borderColor: d.is_active ? '#16a34a' : '#cbd5e1', transition: 'all 0.2s' }}>
                       {d.dock_no} {d.is_active ? '✅' : '❌'}
                     </button>
                   ))}
                 </div>
+                <p style={{ margin: '10px 0 0', fontSize: '12px', color: '#94a3b8' }}>✅ = Active · ❌ = Inactive</p>
               </div>
+
               {renderHourlyOutboundSummary()}
+              
               {outboundDocksCount === 0 ? (
                 <div style={{ textAlign: 'center', padding: '40px', background: '#fee2e2', color: '#991b1b', borderRadius: '8px', fontWeight: 'bold' }}>
-                  ⚠️ ยังไม่มีประตู Outbound ในฐานข้อมูล
+                  ⚠️ ยังไม่มีประตูใดเป็น Outbound ในฐานข้อมูล
                 </div>
               ) : renderOutboundHeatmap('admin')}
             </div>
@@ -1143,43 +1234,75 @@ function App() {
         <>
           <div className="card">
             <div style={{ display: 'flex', gap: '10px', borderBottom: '2px solid #eee', paddingBottom: '10px', justifyContent: 'center' }}>
-              <button onClick={() => setYardTab('tasks')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: yardTab === 'tasks' ? '#1976d2' : '#f1f5f9', color: yardTab === 'tasks' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer' }}>🚛 งานลากตู้</button>
-              <button onClick={() => setYardTab('outbound')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: yardTab === 'outbound' ? '#8b5cf6' : '#f1f5f9', color: yardTab === 'outbound' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer' }}>📦 Outbound Heatmap</button>
+              <button onClick={() => setYardTab('tasks')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: yardTab === 'tasks' ? '#1976d2' : '#f1f5f9', color: yardTab === 'tasks' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>🚛 งานลากตู้</button>
+              <button onClick={() => setYardTab('outbound')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: yardTab === 'outbound' ? '#8b5cf6' : '#f1f5f9', color: yardTab === 'outbound' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s' }}>📦 Outbound Heatmap</button>
             </div>
           </div>
+
           {yardTab === 'tasks' && (<>
           <div className="card">
             <h2>🏗️ Shunt Truck Monitor</h2>
             <form onSubmit={handleCreateYardOrder} style={{ display: 'flex', gap: '15px', flexWrap: 'wrap', marginTop: '15px', }} >
-              <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>บริษัท</label> <select value={yardCompanyId} onChange={(e) => setYardCompanyId(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: '6px' }} required > <option value="">-- เลือก --</option> {companiesList.map((c) => ( <option key={c.id} value={c.id}>{c.name || c.code}</option> ))} </select> </div>
+              <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>บริษัท (Carrier)</label> <select value={yardCompanyId} onChange={(e) => setYardCompanyId(e.target.value)} style={{ width: '100%', padding: '12px', borderRadius: '6px', border: '1px solid #ccc', }} required > <option value="">-- เลือกบริษัท --</option> {companiesList.map((comp) => ( <option key={comp.id} value={comp.id}> {comp.name || comp.code || comp.company_name || 'ไม่ระบุชื่อ'} </option> ))} </select> </div>
               <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>ทะเบียนตู้</label> <input type="text" value={yardContainerNo} onChange={(e) => setYardContainerNo(e.target.value)} required /> </div>
-              <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>ต้นทาง</label> <input type="text" value={yardOrigin} onChange={(e) => setYardOrigin(e.target.value)} required /> </div>
-              <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>ปลายทาง</label> <input type="text" value={yardDestination} onChange={(e) => setYardDestination(e.target.value)} required /> </div>
-              <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: '15px' }} > <button type="submit" className="btn-action on-dock" style={{ padding: '12px 25px' }}>📤 ส่งงาน</button> </div>
+              <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>📍 ต้นทาง</label> <input type="text" value={yardOrigin} onChange={(e) => setYardOrigin(e.target.value)} required /> </div>
+              <div className="form-group" style={{ flex: 1, minWidth: '150px' }} > <label>🏁 ปลายทาง</label> <input type="text" value={yardDestination} onChange={(e) => setYardDestination(e.target.value)} required /> </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', paddingBottom: '15px', }} > <button type="submit" className="btn-action on-dock" style={{ padding: '12px 25px', fontSize: '16px' }} disabled={loading} > {loading ? 'กำลังส่ง...' : '📤 ส่งงาน'} </button> </div>
             </form>
           </div>
           <div className="dashboard-card">
+            <h3>📋 รายการงานลากตู้</h3>
             <div className="table-responsive">
               <table className="dashboard-table">
-                <thead> <tr> <th>เวลาแจ้ง</th> <th>ทะเบียนตู้</th> <th>📍 ต้นทาง</th> <th>🏁 ปลายทาง</th> <th>สถานะงาน</th> </tr> </thead>
+                <thead> <tr> <th>เวลาแจ้ง</th> <th>บริษัท</th> <th>ทะเบียนตู้</th> <th>📍 ต้นทาง</th> <th>🏁 ปลายทาง</th> <th>สถานะงาน</th> </tr> </thead>
                 <tbody>
-                  {yardOrders.map((order) => (
-                    <tr key={order.id}>
-                      <td>{new Date(order.created_at).toLocaleString('th-TH')}</td>
-                      <td><strong>{order.container_no}</strong></td>
-                      <td style={{ color: '#1976d2', fontWeight: 'bold' }}> {order.origin} </td>
-                      <td style={{ color: '#d32f2f', fontWeight: 'bold' }}> {order.destination} </td>
-                      <td><span className="status-badge Call-Up">รอดำเนินการ</span></td>
-                    </tr>
-                  ))}
+                  {yardOrders.length === 0 ? ( <tr> <td colSpan={6} style={{ textAlign: 'center', padding: '20px' }} > 🎉 ไม่มีคำสั่งค้าง </td> </tr> ) : (
+                    yardOrders.map((order) => (
+                      <tr key={order.id}>
+                        <td> {new Date(order.created_at).toLocaleString('th-TH')} </td>
+                        <td> <strong> {getCompanyName(order.companies, order.company_id)} </strong> </td>
+                        <td> <strong>{order.container_no}</strong> </td>
+                        <td style={{ color: '#1976d2', fontWeight: 'bold' }}> {order.origin} </td>
+                        <td style={{ color: '#d32f2f', fontWeight: 'bold' }}> {order.destination} </td>
+                        <td> <span className={`status-badge Call-Up`}> รอดำเนินการ </span> </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
                </table>
             </div>
           </div>
           </>)}
+
           {yardTab === 'outbound' && (
             <div className="card">
               <h2 style={{ textAlign: 'center', marginBottom: '20px', color: '#8b5cf6' }}>📦 Outbound Heatmap</h2>
+
+              <div style={{ marginBottom: '20px', background: '#f8fafc', borderRadius: '10px', padding: '15px', border: '1px solid #e2e8f0' }}>
+                <p style={{ margin: '0 0 12px', fontWeight: 'bold', color: '#334155' }}>⚙️ จัดการประตู (Active / Inactive)</p>
+                <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#64748b', fontWeight: '600' }}>Outbound / Both</p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
+                  {allDocksList.filter((d: any) => d.allowed_type === 'Outbound' || d.allowed_type === 'Both').map((d: any) => (
+                    <button key={d.id} onClick={() => handleToggleDockActive(d.dock_no, d.is_active)}
+                      title={d.is_active ? 'คลิกเพื่อปิดใช้งาน' : 'คลิกเพื่อเปิดใช้งาน'}
+                      style={{ padding: '6px 14px', borderRadius: '20px', border: '2px solid', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', background: d.is_active ? '#dcfce7' : '#f1f5f9', color: d.is_active ? '#16a34a' : '#94a3b8', borderColor: d.is_active ? '#16a34a' : '#cbd5e1', transition: 'all 0.2s' }}>
+                      {d.dock_no} {d.is_active ? '✅' : '❌'}
+                    </button>
+                  ))}
+                </div>
+                <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#64748b', fontWeight: '600' }}>Inbound / Both</p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                  {allDocksList.filter((d: any) => d.allowed_type === 'Inbound' || d.allowed_type === 'Both').map((d: any) => (
+                    <button key={`inb-${d.id}`} onClick={() => handleToggleDockActive(d.dock_no, d.is_active)}
+                      title={d.is_active ? 'คลิกเพื่อปิดใช้งาน' : 'คลิกเพื่อเปิดใช้งาน'}
+                      style={{ padding: '6px 14px', borderRadius: '20px', border: '2px solid', fontSize: '13px', fontWeight: 'bold', cursor: 'pointer', background: d.is_active ? '#dbeafe' : '#f1f5f9', color: d.is_active ? '#1d4ed8' : '#94a3b8', borderColor: d.is_active ? '#1d4ed8' : '#cbd5e1', transition: 'all 0.2s' }}>
+                      {d.dock_no} {d.is_active ? '✅' : '❌'}
+                    </button>
+                  ))}
+                </div>
+                <p style={{ margin: '10px 0 0', fontSize: '12px', color: '#94a3b8' }}>✅ = Active · ❌ = Inactive (ซ่อน)</p>
+              </div>
+
               {masterDocksList.length === 0 ? <p style={{ textAlign: 'center' }}>กำลังโหลด...</p> : renderOutboundHeatmap('tpt')}
             </div>
           )}
@@ -1188,26 +1311,27 @@ function App() {
 
       {currentView === 'shunt' && (
         <div className="card">
-          <h2 style={{ textAlign: 'center', marginBottom: '20px', color: '#1976d2' }} > 🚛 ทีม {shuntCompany} </h2>
+          <h2 style={{ textAlign: 'center', marginBottom: '20px', color: '#1976d2', }} > 🚛 ทีม {shuntCompany} </h2>
+          
           <div style={{ display: 'flex', gap: '10px', marginBottom: '20px', borderBottom: '2px solid #eee', paddingBottom: '10px', justifyContent: 'center' }}>
-            <button onClick={() => setShuntTab('tasks')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: shuntTab === 'tasks' ? '#1976d2' : '#f1f5f9', color: shuntTab === 'tasks' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer' }}> 📋 รายการงานลากตู้ </button>
-            <button onClick={() => setShuntTab('outbound')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: shuntTab === 'outbound' ? '#8b5cf6' : '#f1f5f9', color: shuntTab === 'outbound' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer' }}> 🏗️ ตู้เปล่าเข้า Dock </button>
+            <button onClick={() => setShuntTab('tasks')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: shuntTab === 'tasks' ? '#1976d2' : '#f1f5f9', color: shuntTab === 'tasks' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 📋 รายการงานลากตู้ </button>
+            <button onClick={() => setShuntTab('outbound')} style={{ padding: '12px 25px', fontSize: '18px', fontWeight: 'bold', background: shuntTab === 'outbound' ? '#8b5cf6' : '#f1f5f9', color: shuntTab === 'outbound' ? 'white' : '#64748b', border: 'none', borderRadius: '8px', cursor: 'pointer', transition: 'all 0.2s', }}> 🏗️ ตู้เปล่าเข้า Dock </button>
           </div>
 
           {shuntTab === 'tasks' && (
             <>
-              {shuntCompany === 'FOREMAN' ? ( <div className="empty-state">กรุณาไปที่แท็บ 'ตู้เปล่าเข้า Dock'</div> ) : shuntOrders.length === 0 ? ( <div className="empty-state">🎉 ไม่มีงานลากตู้ค้าง</div> ) : (
+              {shuntCompany === 'FOREMAN' ? ( <div className="empty-state">Foreman ไม่มีหน้าที่ลากตู้ กรุณาไปที่แท็บ 'ตู้เปล่าเข้า Dock'</div> ) : shuntOrders.length === 0 ? ( <div className="empty-state">🎉 ไม่มีงานลากตู้ค้าง</div> ) : (
                 <div className="table-responsive">
                   <table className="receiver-table">
                     <thead> <tr> <th>เวลาแจ้ง</th> <th>ทะเบียนตู้</th> <th>📍 ต้นทาง</th> <th>🏁 ปลายทาง</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
                     <tbody>
                       {shuntOrders.map((order) => (
                         <tr key={order.id}>
-                          <td style={{ color: '#666', fontSize: '13px' }}> {new Date(order.created_at).toLocaleString('th-TH')} </td>
-                          <td style={{ fontSize: '18px', fontWeight: '900', color: '#1976d2' }}> {order.container_no} </td>
-                          <td style={{ fontSize: '16px', fontWeight: 'bold', color: '#d32f2f' }}> {order.origin} </td>
-                          <td style={{ fontSize: '16px', fontWeight: 'bold', color: '#2e7d32' }}> {order.destination} </td>
-                          <td style={{ textAlign: 'center' }}> <button className="btn-action assigned" onClick={() => handleCompleteShuntOrder( order.id, order.container_no, order.destination, order.origin ) } > ✅ เสร็จ </button> </td>
+                          <td style={{ color: '#666', fontSize: '13px' }}> {new Date(order.created_at).toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', })} น. </td>
+                          <td style={{ fontSize: '18px', fontWeight: '900', color: '#1976d2', }} > {order.container_no} </td>
+                          <td style={{ fontSize: '16px', fontWeight: 'bold', color: '#d32f2f', }} > {order.origin} </td>
+                          <td style={{ fontSize: '16px', fontWeight: 'bold', color: '#2e7d32', }} > {order.destination} </td>
+                          <td style={{ textAlign: 'center', width: '120px' }}> <button className="btn-action assigned" onClick={() => handleCompleteShuntOrder( order.id, order.container_no, order.destination, order.origin ) } > ✅ เสร็จ </button> </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1219,7 +1343,7 @@ function App() {
 
           {shuntTab === 'outbound' && (
             <div style={{ background: '#f8fafc', padding: '15px', borderRadius: '8px' }}>
-              <h3 style={{ margin: '0 0 15px 0', color: '#334155', textAlign: 'center' }}>เลือกประตูเอาตู้เปล่าเข้า</h3>
+              <h3 style={{ margin: '0 0 15px 0', color: '#334155', textAlign: 'center' }}>เลือกประตูตู้เปล่าเข้า</h3>
               {outboundDocksCount === 0 ? ( <div style={{ textAlign: 'center', padding: '40px', background: '#fee2e2', color: '#991b1b', borderRadius: '8px', fontWeight: 'bold' }}>⚠️ ยังไม่มีประตูใดเป็น Outbound ในฐานข้อมูล</div> ) : renderOutboundHeatmap('shunt')}
             </div>
           )}
@@ -1315,11 +1439,20 @@ function App() {
             <div className="driver-queue-box">
               <p>หมายเลขคิวของคุณ</p>
                <div className="big-queue"> {getShortQueue(driverJobData.queue_number)} </div>
+              {isMultiDrop && ( <div className="multi-drop-alert"> 📍 ลงสินค้าต่อ {currentTargetDC} </div> )}
               <div className="driver-dock"> ช่องจอด (Dock):{' '} <span>{driverJobData.dock_number || 'กำลังรอเรียก...'}</span> </div>
+            </div>
+            <div className="driver-info-grid">
+              <div> <strong>ทะเบียนรถ:</strong>{' '} {getDisplayPlate(driverJobData.daily_plan)} </div>
+              <div> <strong>Vendor:</strong> {driverJobData.daily_plan?.vendor_name} </div>
+              <div> <strong>สถานะ:</strong>{' '} <span className={`status-badge ${driverJobData.status.replace( ' ', '-' )}`} > {driverJobData.status} </span> </div>
             </div>
             <div className="driver-action-area">
               {driverJobData.status === 'Assigned' && ( <button className="btn-action assigned driver-btn-big" onClick={() => handleUpdateStatus(driverJobData, driverJobData.status) } > 🚚 นำรถเข้า Dock แล้ว </button> )}
               {driverJobData.status === 'End Load' && ( <button className="btn-action end-load driver-btn-big" onClick={() => handleUpdateStatus(driverJobData, driverJobData.status) } > 🔙 ถอยรถออกจาก Dock แล้ว </button> )}
+              {(driverJobData.status === 'Waiting Unload' || driverJobData.status === 'Call Up') && ( <div className="driver-wait-msg">รอเรียกเข้าประตู...</div> )}
+              {(driverJobData.status === 'On Dock' || driverJobData.status === 'Unloading') && ( <div className="driver-wait-msg">กำลังลงสินค้า</div> )}
+              {driverJobData.status === 'Off Dock' && ( <div className="driver-wait-msg"> ติดต่อ BH Team เพื่อ จบงาน </div> )}
              </div>
           </div>
         </div>
@@ -1330,16 +1463,19 @@ function App() {
           <h2>📦 รอลงสินค้า - คลัง {receiverDC}</h2>
           <div className="table-responsive">
             <table className="receiver-table">
-              <thead> <tr> <th>คิว</th> <th>ทะเบียน</th> <th>บริษัทขนส่ง</th> <th>Dock</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
+              <thead> <tr> <th>คิว</th> <th>Vendor</th> <th>ทะเบียน</th> <th>บริษัทขนส่ง</th> <th>ประเภทรถ</th> <th>Dock</th> <th>Check In</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
               <tbody>
                 {waitingJobs.map((job) => (
                   <tr key={job.id}>
                     <td className="queue-cell"> {getShortQueue(job.queue_number)} </td>
+                    <td className="vendor-cell"> {job.daily_plan?.vendor_code && ( <span style={{ color: '#64748b', fontSize: '11px', display: 'block', }} > [{job.daily_plan.vendor_code}] </span> )} {job.daily_plan?.vendor_name || '-'} </td>
                     <td>{getDisplayPlate(job.daily_plan)}</td>
                     <td style={{ fontWeight: 'bold', color: '#555' }}> {job.daily_plan?.transport_company || '-'} </td>
+                    <td>{job.daily_plan?.transport_type}</td>
                     <td> <span className="dock-badge"> {job.dock_number || '-'} </span> </td>
+                    <td> {new Date(job.check_in_time).toLocaleString('th-TH', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', })} น. </td>
                     <td> <span className={`status-badge ${job.status.replace( ' ', '-' )}`} > {job.status} </span> </td>
-                    <td style={{ textAlign: 'center' }}> {renderActionButton(job)} </td>
+                    <td style={{ textAlign: 'center', width: '160px' }}> {renderActionButton(job)} </td>
                   </tr>
                 ))}
               </tbody>
@@ -1348,22 +1484,82 @@ function App() {
         </div>
       )}
 
-      {checkInModal && checkInModal.isOpen && (
+      {currentView === 'unloader' && (
+        <div className="card">
+          <h2>📦 Unloading Dashboard (ကုန်ချမည့်စာရင်း)</h2>
+          {waitingJobs.length === 0 ? ( <div className="empty-state"> 🎉 No tasks waiting / ကုန်ချရန် မရှိပါ </div> ) : (
+            <div className="table-responsive">
+              <table className="receiver-table">
+                <thead> <tr> <th>DC</th> <th>Dock</th> <th>License</th> <th>Vendor</th> <th>Status</th> <th style={{ textAlign: 'center' }}>Action</th> </tr> </thead>
+                <tbody>
+                  {waitingJobs.map((job) => (
+                    <tr key={job.id}>
+                      <td> <span className="dock-badge" style={{ backgroundColor: '#475569' }} > {getDCFromQueue(job.queue_number)} </span> </td>
+                      <td> <span className="dock-badge" style={{ backgroundColor: '#1976d2' }} > {job.dock_number || '-'} </span> </td>
+                      <td>{getDisplayPlate(job.daily_plan)}</td>
+                      <td className="vendor-cell"> {job.daily_plan?.vendor_code && ( <span style={{ color: '#64748b', fontSize: '11px', display: 'block', }} > [{job.daily_plan.vendor_code}] </span> )} {job.daily_plan?.vendor_name || '-'} </td>
+                      <td> <span className={`status-badge ${job.status.replace( ' ', '-' )}`} > {job.status} </span> </td>
+                      <td style={{ textAlign: 'center', width: '220px' }}>
+                        {job.status === 'On Dock' ? ( <button className="btn-action on-dock" onClick={() => handleUpdateStatus(job, job.status)} > 📦 Start (စတင်ချပါ) </button> ) : job.status === 'Unloading' ? ( <button className="btn-action unloading" onClick={() => handleUpdateStatus(job, job.status)} > ✅ Finish (ပြီးပါပြီ) </button> ) : ( <div className="driver-wait-msg" style={{ fontSize: '13px', padding: '6px', animation: 'none', }} > Waiting (စောင့်ပါ) </div> )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {dockModal && dockModal.isOpen && (
+        <div className="modal-overlay">
+          <div className="modal-card" style={{ maxWidth: '800px', width: '95%' }} >
+            <h3 style={{ fontSize: '22px', borderBottom: '2px solid #eee', paddingBottom: '10px', }} > 📍 คลัง {getDCRoute(dockModal.job.queue_number)}: เลือกช่องจอดสินค้า </h3>
+            <p style={{ fontSize: '16px', color: '#666', marginTop: '10px' }}> รถทะเบียน{' '} <strong>{getDisplayPlate(dockModal.job.daily_plan)}</strong> ( {dockModal.job.daily_plan?.transport_type})<br /> กรุณาจิ้มเลือกประตู{' '} <strong style={{ color: '#d32f2f', fontSize: '18px' }}> {dockModal.requiredCount} </strong>{' '} ช่อง </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '20px', maxHeight: '400px', overflowY: 'auto', padding: '10px', background: '#f8fafc', borderRadius: '8px', }} >
+              {dockModal.docks.length === 0 ? ( <p style={{ color: 'red' }}> ไม่พบประตูที่เปิดใช้งานสำหรับคลังนี้ </p> ) : (
+                dockModal.docks.map((dock) => {
+                  const isSelected = dockModal.selectedDocks.includes( dock.dock_no ); const isOccupied = dock.status === 'Occupied';
+                  return (
+                    <button key={dock.id} disabled={isOccupied} onClick={() => { let newSelected = [...dockModal.selectedDocks]; if (isSelected) { newSelected = newSelected.filter( (d) => d !== dock.dock_no ); } else if ( newSelected.length < dockModal.requiredCount ) { newSelected.push(dock.dock_no); } setDockModal({ ...dockModal, selectedDocks: newSelected, }); }} style={{ flex: '1 1 calc(20% - 10px)', minWidth: '90px', padding: '15px 10px', borderRadius: '8px', border: 'none', fontWeight: 'bold', cursor: isOccupied ? 'not-allowed' : 'pointer', transition: 'all 0.2s', backgroundColor: isOccupied ? '#ef4444' : isSelected ? '#3b82f6' : '#22c55e', color: 'white', boxShadow: isSelected ? '0 0 0 3px #1d4ed8' : '0 2px 4px rgba(0,0,0,0.1)', opacity: isOccupied ? 0.8 : 1, }} >
+                      <div style={{ fontSize: '20px' }}>{dock.dock_no}</div>
+                      <div style={{ fontSize: '12px', marginTop: '5px', background: 'rgba(0,0,0,0.2)', padding: '2px 4px', borderRadius: '4px', }} > {isOccupied ? dock.current_plate || 'ไม่ว่าง' : 'ว่าง'} </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            <div className="modal-buttons" style={{ marginTop: '25px' }}>
+              <button className="btn-action on-dock" onClick={handleConfirmDock} disabled={ dockModal.selectedDocks.length !== dockModal.requiredCount } style={{ padding: '12px 20px', fontSize: '18px', opacity: dockModal.selectedDocks.length !== dockModal.requiredCount ? 0.5 : 1, }} > ✅ ยืนยันช่องจอด </button>
+              <button className="btn-rollback" onClick={() => setDockModal(null)} style={{ padding: '12px 20px', fontSize: '18px' }} > ❌ ยกเลิก </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {multiDropConfig && (
         <div className="modal-overlay">
           <div className="modal-card">
-            <h3>📍 เลือกคลังสินค้า (DC) สำหรับลงสินค้า</h3>
-            <p> ทะเบียนรถ:{' '} <strong style={{ color: '#d32f2f' }}> {getDisplayPlate(checkInModal.plan)} </strong> </p>
-            <div className="dc-grid" style={{ marginTop: '15px' }}>
-              {MASTER_DCS.map((dc) => (
-                <label key={dc} className={`dc-radio-card ${ checkInModal.selectedDC === dc ? 'active' : '' }`} >
-                  <input type="radio" value={dc} checked={checkInModal.selectedDC === dc} onChange={(e) => setCheckInModal({ ...checkInModal, selectedDC: e.target.value, }) } style={{ display: 'none' }} /> {dc}
-                </label>
-              ))}
-            </div>
-            <div className="modal-buttons" style={{ marginTop: '20px' }}>
-              <button className="btn-action on-dock" onClick={handleCheckIn} disabled={loading} style={{ padding: '12px 20px', fontSize: '16px' }} > {loading ? 'กำลังบันทึก...' : '✅ ยืนยัน Check-In'} </button>
-              <button className="btn-rollback" onClick={() => setCheckInModal(null)} style={{ padding: '12px 20px', fontSize: '16px' }} > ❌ ยกเลิก </button>
-            </div>
+            {multiDropConfig.step === 'ask' ? (
+              <>
+                 <h3 style={{ fontSize: '22px' }}> ❓ มีงานไปลงคลังอื่นต่อหรือไม่? </h3>
+                <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px', }} > (နောက်ထပ်ချစရာရှိသေးလား) </p>
+                <div className="modal-buttons">
+                  <button className="btn-action on-dock" style={{ padding: '15px', fontSize: '18px' }} onClick={() => setMultiDropConfig({ ...multiDropConfig, step: 'select' }) } > ✅ มี (ရှိသည်) - ไปคลังอื่น </button>
+                  <button className="btn-action end-load" style={{ padding: '15px', fontSize: '18px' }} onClick={() => handleMultiDropChoice('no')} > ❌ ไม่มี (မရှိပါ) - จบงาน </button>
+                  <button className="btn-rollback" style={{ marginTop: '15px', padding: '10px' }} onClick={() => setMultiDropConfig(null)} > ยกเลิก (Cancel) </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h3 style={{ fontSize: '22px' }}>📍 เลือก DC ถัดไป</h3>
+                <p style={{ fontSize: '16px', color: '#666', marginBottom: '20px', }} > (နောက်ထပ် DC ကိုရွေးပါ) </p>
+                <div className="modal-buttons">
+                  {MASTER_DCS.map((dc) => ( <button key={dc} className="btn-action call-up" style={{ padding: '15px', fontSize: '18px' }} onClick={() => handleMultiDropChoice('yes', dc)} > 🚚 {dc} </button> ))}
+                  <button className="btn-rollback" style={{ marginTop: '15px', padding: '10px' }} onClick={() => setMultiDropConfig(null)} > ย้อนกลับ (Back) </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
